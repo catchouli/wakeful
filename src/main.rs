@@ -1,12 +1,15 @@
 mod movement;
 
-use bevy::image::ImagePlugin;
 use bevy::prelude::*;
+use bevy::window::WindowResolution;
+use bevy_pixcam::{PixelCameraPlugin, PixelViewport, PixelZoom};
 
 use crate::movement::{PLAYER_SPEED, move_position};
 
-/// Scales the 16px source sprite up on screen.
-const SPRITE_SCALE: f32 = 4.0;
+/// The virtual resolution the game is rendered at, then integer-upscaled
+/// to the window with black bars around it.
+const GAME_WIDTH: i32 = 640;
+const GAME_HEIGHT: i32 = 480;
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
 /// display refresh rate or frame timing jitter.
@@ -22,12 +25,17 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "wakeful".into(),
+                        resolution: WindowResolution::new(
+                            (GAME_WIDTH * 2) as u32,
+                            (GAME_HEIGHT * 2) as u32,
+                        ),
                         ..default()
                     }),
                     ..default()
                 })
                 .set(ImagePlugin::default_nearest()),
         )
+        .add_plugins(PixelCameraPlugin)
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .add_systems(Startup, (setup_camera, spawn_player))
@@ -43,14 +51,20 @@ fn quit_on_escape(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppEx
 }
 
 fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera2d);
+    commands.spawn((
+        Camera2d,
+        PixelZoom::FitSize {
+            width: GAME_WIDTH,
+            height: GAME_HEIGHT,
+        },
+        PixelViewport,
+    ));
 }
 
 fn spawn_player(mut commands: Commands, assets: Res<AssetServer>) {
     commands.spawn((
         Player,
         Sprite::from_image(assets.load("sprites/player.png")),
-        Transform::from_scale(Vec3::splat(SPRITE_SCALE)),
     ));
 }
 
