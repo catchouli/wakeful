@@ -8,6 +8,10 @@ use crate::movement::{PLAYER_SPEED, move_position};
 /// Scales the 16px source sprite up on screen.
 const SPRITE_SCALE: f32 = 4.0;
 
+/// Movement logic runs on a fixed step so behavior doesn't depend on
+/// display refresh rate or frame timing jitter.
+const FIXED_HZ: f64 = 60.0;
+
 #[derive(Component)]
 struct Player;
 
@@ -25,9 +29,17 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
+        .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .add_systems(Startup, (setup_camera, spawn_player))
-        .add_systems(Update, move_player)
+        .add_systems(Update, quit_on_escape)
+        .add_systems(FixedUpdate, move_player)
         .run();
+}
+
+fn quit_on_escape(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
+    if keys.just_pressed(KeyCode::Escape) {
+        exit.write(AppExit::Success);
+    }
 }
 
 fn setup_camera(mut commands: Commands) {
