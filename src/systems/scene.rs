@@ -8,13 +8,20 @@ use bevy::world_serialization::WorldAsset;
 
 use crate::scene::Scene;
 use crate::screen;
-use crate::{CurrentScene, GameCameraQuery, Player, PlayerModel, SceneApplied};
+use crate::{BackgroundSprite, CurrentScene, GameCameraQuery, Player, PlayerModel, SceneApplied};
 
 /// Camera layer that draws the pre-rendered background image.
 const BG_LAYER: usize = 2;
 
+/// The scene file the game loads; the editor saves back to this path via
+/// the copy stored on `CurrentScene`.
+const SCENE_PATH: &str = "scenes/devroom.scene";
+
 pub fn load_scene(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(CurrentScene(assets.load("scenes/devroom.scene")));
+    commands.insert_resource(CurrentScene {
+        handle: assets.load(SCENE_PATH),
+        path: SCENE_PATH,
+    });
     commands.insert_resource(SceneApplied(false));
 }
 
@@ -35,7 +42,7 @@ pub fn apply_scene(
     if applied.0 {
         return;
     }
-    let Some(scene) = scenes.get(&current.0) else {
+    let Some(scene) = scenes.get(&current.handle) else {
         return;
     };
 
@@ -63,18 +70,7 @@ pub fn apply_scene(
     ));
 
     if let Some(path) = &scene.background {
-        commands.spawn((
-            Sprite {
-                image: assets.load(path),
-                // Backgrounds are authored at the virtual resolution.
-                custom_size: Some(Vec2::new(
-                    screen::GAME_WIDTH as f32,
-                    screen::GAME_HEIGHT as f32,
-                )),
-                ..default()
-            },
-            RenderLayers::layer(BG_LAYER),
-        ));
+        spawn_background(&mut commands, &assets, path);
     }
 
     if let Some(path) = &scene.character_model {
@@ -82,6 +78,24 @@ pub fn apply_scene(
     }
 
     applied.0 = true;
+}
+
+/// Spawns the scene's background image on its dedicated layer. Also used
+/// by the editor when the background path changes at runtime.
+pub(crate) fn spawn_background(commands: &mut Commands, assets: &AssetServer, path: &str) {
+    commands.spawn((
+        BackgroundSprite,
+        Sprite {
+            image: assets.load(path.to_owned()),
+            // Backgrounds are authored at the virtual resolution.
+            custom_size: Some(Vec2::new(
+                screen::GAME_WIDTH as f32,
+                screen::GAME_HEIGHT as f32,
+            )),
+            ..default()
+        },
+        RenderLayers::layer(BG_LAYER),
+    ));
 }
 
 /// Swaps the placeholder capsule for the scene's character model once the

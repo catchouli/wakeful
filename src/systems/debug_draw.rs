@@ -29,7 +29,7 @@ pub fn debug_draw_walkables(
     }
     let Some(grid) = current
         .as_ref()
-        .and_then(|c| scenes.get(&c.0))
+        .and_then(|c| scenes.get(&c.handle))
         .and_then(|scene| scene.walkable.as_ref())
     else {
         return;

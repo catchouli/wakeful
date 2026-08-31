@@ -1,3 +1,4 @@
+mod editor;
 mod movement;
 mod scene;
 mod screen;
@@ -24,11 +25,20 @@ struct Player;
 #[derive(Component)]
 struct GameCamera;
 
+/// Sprite spawned for the scene's background image; the editor despawns
+/// and respawns these when the background path changes.
+#[derive(Component)]
+struct BackgroundSprite;
+
 /// The scene the game is currently running. `load_scene` inserts it with a
 /// handle whose asset loads asynchronously; `apply_scene` polls it until
-/// the file arrives.
+/// the file arrives. The path is kept so the editor can save back to the
+/// file the scene was loaded from.
 #[derive(Resource)]
-struct CurrentScene(Handle<Scene>);
+struct CurrentScene {
+    handle: Handle<Scene>,
+    path: &'static str,
+}
 
 /// One-shot flag pairing with `CurrentScene`: the bool starts `false` and
 /// `apply_scene` sets it `true` after turning the loaded scene into live
@@ -60,6 +70,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
+        .add_plugins(editor::plugin)
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .add_systems(
