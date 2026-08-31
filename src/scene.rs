@@ -177,4 +177,18 @@ mod tests {
         assert!(grid.is_walkable(-1.5, -1.5));
         assert!(!grid.is_walkable(-0.5, -1.5));
     }
+
+    #[test]
+    fn ships_a_valid_devroom_scene() {
+        // The file the game loads at startup must stay parseable, and its
+        // spawn point (world origin) must remain walkable.
+        let src = include_str!("../assets/scenes/devroom.scene");
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert!(
+            scene
+                .walkable
+                .expect("dev room needs a walkable grid")
+                .is_walkable(0.0, 0.0)
+        );
+    }
 }

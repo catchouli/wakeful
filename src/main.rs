@@ -4,13 +4,14 @@ mod screen;
 
 use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
+use bevy::math::Isometry3d;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 use bevy::world_serialization::WorldAsset;
 use bevy_common_assets::ron::RonAssetPlugin;
 
 use crate::movement::{PLAYER_SPEED, move_position};
-use crate::scene::Scene;
+use crate::scene::{Scene, WalkableGrid};
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
 /// display refresh rate or frame timing jitter.
@@ -26,6 +27,12 @@ const PLAYER_Y: f32 = PLAYER_RADIUS + PLAYER_HALF_HEIGHT;
 const GROUND_SIZE: f32 = 30.0;
 const PLAYER_COLOR: Color = Color::srgb(0.949, 0.651, 0.306);
 const GROUND_COLOR: Color = Color::srgb(0.23, 0.21, 0.28);
+
+/// Walkable-grid debug overlay: drawn just above the ground so the rects
+/// don't z-fight with it.
+const DEBUG_GRID_Y: f32 = 0.02;
+const DEBUG_WALKABLE_COLOR: Color = Color::srgba(0.25, 0.9, 0.35, 0.4);
+const DEBUG_BLOCKED_COLOR: Color = Color::srgba(0.9, 0.25, 0.2, 0.16);
 
 #[derive(Component)]
 struct Player;
@@ -80,6 +87,7 @@ fn main() {
                 screen::resize_present,
                 apply_scene,
                 apply_player_model,
+                debug_draw_walkables,
             ),
         )
         .add_systems(FixedUpdate, move_player)
@@ -233,6 +241,56 @@ fn spawn_player(
         MeshMaterial3d(materials.add(StandardMaterial::from_color(PLAYER_COLOR))),
         Transform::from_xyz(0.0, PLAYER_Y, 0.0),
     ));
+}
+
+/// Toggled with F2: outlines the scene's walkable grid on the ground so
+/// movement bounds are visible while testing.
+fn debug_draw_walkables(
+    keys: Res<ButtonInput<KeyCode>>,
+    scenes: Res<Assets<Scene>>,
+    current: Option<Res<CurrentScene>>,
+    mut gizmos: Gizmos,
+    mut enabled: Local<bool>,
+) {
+    if keys.just_pressed(KeyCode::F2) {
+        *enabled = !*enabled;
+    }
+    if !*enabled {
+        return;
+    }
+    let Some(grid) = current
+        .as_ref()
+        .and_then(|c| scenes.get(&c.0))
+        .and_then(|scene| scene.walkable.as_ref())
+    else {
+        return;
+    };
+    draw_walkable_grid(&mut gizmos, grid);
+}
+
+/// Draws one rect per cell: bright for walkable, dim for blocked.
+fn draw_walkable_grid(gizmos: &mut Gizmos, grid: &WalkableGrid) {
+    let rotation = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2);
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            let walkable = grid
+                .cells
+                .get(row * grid.cols + col)
+                .copied()
+                .unwrap_or(false);
+            let x = grid.origin[0] + (col as f32 + 0.5) * grid.cell_size;
+            let z = grid.origin[1] + (row as f32 + 0.5) * grid.cell_size;
+            gizmos.rect(
+                Isometry3d::new(Vec3::new(x, DEBUG_GRID_Y, z), rotation),
+                Vec2::splat(grid.cell_size),
+                if walkable {
+                    DEBUG_WALKABLE_COLOR
+                } else {
+                    DEBUG_BLOCKED_COLOR
+                },
+            );
+        }
+    }
 }
 
 fn move_player(
