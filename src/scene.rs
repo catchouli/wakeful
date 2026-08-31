@@ -5,9 +5,9 @@
 use bevy::asset::Asset;
 use bevy::math::Vec2;
 use bevy::reflect::TypePath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Asset, TypePath, Deserialize)]
+#[derive(Asset, TypePath, Deserialize, Serialize)]
 pub struct Scene {
     /// Path to the background image, relative to `assets/`. Expected to be
     /// the game's virtual resolution (640x480), like a pre-rendered FF7 room.
@@ -19,14 +19,14 @@ pub struct Scene {
     pub character_model: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Copy)]
 pub struct CameraPose {
     pub position: [f32; 3],
     pub target: [f32; 3],
     pub fov_degrees: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct WalkableGrid {
     /// World XZ position of the corner of cell `[0][0]`.
     pub origin: [f32; 2],
@@ -83,6 +83,16 @@ impl WalkableGrid {
             return Vec2::new(from.x, to.y);
         }
         from
+    }
+
+    /// Sets the walkable flag of the cell containing the world position.
+    /// Returns false (leaving the grid unchanged) if it lies outside.
+    pub fn set_walkable(&mut self, x: f32, z: f32, walkable: bool) -> bool {
+        let Some((col, row)) = self.cell_at(x, z) else {
+            return false;
+        };
+        self.cells[row * self.cols + col] = walkable;
+        true
     }
 }
 
@@ -154,6 +164,23 @@ mod tests {
         let from = Vec2::new(-1.5, -1.5);
         let to = Vec2::new(-0.5, -0.4);
         assert_eq!(grid.constrain(from, to), from);
+    }
+
+    #[test]
+    fn set_walkable_flips_the_cell_under_a_position() {
+        let mut grid = grid();
+        assert!(!grid.is_walkable(-0.5, -1.5));
+        assert!(grid.set_walkable(-0.5, -1.5, true));
+        assert!(grid.is_walkable(-0.5, -1.5));
+        assert!(grid.set_walkable(-0.5, -1.5, false));
+        assert!(!grid.is_walkable(-0.5, -1.5));
+    }
+
+    #[test]
+    fn set_walkable_ignores_outside_positions() {
+        let mut grid = grid();
+        assert!(!grid.set_walkable(50.0, 50.0, true));
+        assert_eq!(grid.cells, [true, false, false, false]);
     }
 
     #[test]
