@@ -9,7 +9,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::window::PrimaryWindow;
 
 /// Virtual resolution the whole game is rendered at.
@@ -45,7 +45,7 @@ pub struct PresentSprite;
 pub struct GameImage(pub Handle<Image>);
 
 pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let image = Image::new_fill(
+    let mut image = Image::new_fill(
         Extent3d {
             width: GAME_WIDTH,
             height: GAME_HEIGHT,
@@ -56,6 +56,10 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
+    // new_fill omits RENDER_ATTACHMENT, but the game camera renders into
+    // this texture; COPY_SRC lets the screenshot tooling read it back.
+    image.texture_descriptor.usage =
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC;
     let handle = images.add(image);
     commands.insert_resource(GameImage(handle.clone()));
 
