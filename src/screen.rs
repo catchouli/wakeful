@@ -7,7 +7,6 @@
 //! can't escape the virtual resolution.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -39,6 +38,12 @@ pub fn presented_size(window: UVec2, game: UVec2) -> UVec2 {
 #[derive(Component)]
 pub struct PresentSprite;
 
+/// Handle to the texture the game camera renders into.
+///
+/// Game code uses this to point its camera at the virtual screen.
+#[derive(Resource)]
+pub struct GameImage(pub Handle<Image>);
+
 pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let image = Image::new_fill(
         Extent3d {
@@ -52,14 +57,7 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         RenderAssetUsages::RENDER_WORLD,
     );
     let handle = images.add(image);
-
-    // The game camera renders into the offscreen texture, layer 0 only,
-    // so it never sees the present pass. RenderTarget is its own component.
-    commands.spawn((
-        Camera2d,
-        RenderTarget::Image(handle.clone().into()),
-        RenderLayers::layer(0),
-    ));
+    commands.insert_resource(GameImage(handle.clone()));
 
     // The present camera owns the window: black bars, then the texture.
     commands.spawn((
