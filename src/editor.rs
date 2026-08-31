@@ -89,8 +89,9 @@ fn save_scene(scene: &Scene, asset_path: &str) -> std::io::Result<PathBuf> {
 }
 
 /// Window cursor position (logical px) mapped into game-texture pixels,
-/// undoing the letterbox math of the present camera. Returns `None` when
-/// the cursor sits on a black bar or outside the window.
+/// undoing the letterbox math of the present camera (which sizes the
+/// picture in logical units — see `screen::presented_logical_size`).
+/// Returns `None` when the cursor sits on a black bar or outside the window.
 pub fn cursor_to_game(
     cursor_logical: Vec2,
     scale_factor: f32,
@@ -583,6 +584,28 @@ mod tests {
         // 2x window scale (HiDPI): logical 640x480 equals physical 1280x960
         let center = cursor_to_game(Vec2::new(320.0, 240.0), 2.0, UVec2::new(1280, 960), game);
         assert_eq!(center, Some(Vec2::new(320.0, 240.0)));
+    }
+
+    #[test]
+    fn cursor_agrees_with_the_presented_size_on_hidpi() {
+        // Pins cursor_to_game against the sprite sizing of resize_present:
+        // the cursor on the presented picture's top-left corner must sample
+        // game pixel (0, 0), its bottom-right corner (639, 479). Scale 2,
+        // letterboxed window (30-unit bars left/right, 10 top/bottom).
+        let window = UVec2::new(1400, 1000);
+        let scale = 2.0;
+        let game = screen::game_size();
+        let presented = screen::presented_logical_size(window, scale, game);
+        let offset = (window.as_vec2() / scale - presented) / 2.0;
+
+        assert_eq!(
+            cursor_to_game(offset, scale, window, game),
+            Some(Vec2::ZERO)
+        );
+        assert_eq!(
+            cursor_to_game(offset + presented - Vec2::ONE, scale, window, game),
+            Some(Vec2::new(639.0, 479.0))
+        );
     }
 
     #[test]

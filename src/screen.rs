@@ -35,6 +35,17 @@ pub fn presented_size(window: UVec2, game: UVec2) -> UVec2 {
     game * integer_scale(window, game)
 }
 
+/// Size of the presented game image in the present camera's world units.
+///
+/// Those units are logical pixels, not physical ones, so the physical
+/// derived size is divided by the scale factor. Skipping that division
+/// renders the picture `scale_factor`x too large on HiDPI displays, which
+/// crops it to its center and skews every cursor mapping built on the
+/// letterbox math.
+pub fn presented_logical_size(window: UVec2, scale_factor: f32, game: UVec2) -> Vec2 {
+    presented_size(window, game).as_vec2() / scale_factor
+}
+
 #[derive(Component)]
 pub struct PresentSprite;
 
@@ -81,7 +92,8 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     ));
 }
 
-/// Runs every frame; cheap, and also covers window resizes for free.
+/// Runs every frame; cheap, and also covers window resizes and scale
+/// factor changes for free.
 pub fn resize_present(
     window: Query<&Window, With<PrimaryWindow>>,
     mut present: Query<&mut Sprite, With<PresentSprite>>,
@@ -90,8 +102,11 @@ pub fn resize_present(
         return;
     };
 
-    let size = presented_size(window.physical_size(), game_size()).as_vec2();
-    sprite.custom_size = Some(size);
+    sprite.custom_size = Some(presented_logical_size(
+        window.physical_size(),
+        window.scale_factor(),
+        game_size(),
+    ));
 }
 
 #[cfg(test)]
@@ -120,6 +135,34 @@ mod tests {
         assert_eq!(
             presented_size(UVec2::new(1920, 1080), game_size()),
             UVec2::new(1280, 960)
+        );
+    }
+
+    #[test]
+    fn logical_size_matches_physical_at_scale_one() {
+        assert_eq!(
+            presented_logical_size(UVec2::new(1000, 900), 1.0, game_size()),
+            Vec2::new(640.0, 480.0)
+        );
+    }
+
+    #[test]
+    fn logical_size_fills_a_hidpi_window() {
+        // Exact-multiple Retina window: the picture fills the window and
+        // each game pixel covers two physical pixels.
+        assert_eq!(
+            presented_logical_size(UVec2::new(1280, 960), 2.0, game_size()),
+            Vec2::new(640.0, 480.0)
+        );
+    }
+
+    #[test]
+    fn logical_size_keeps_the_letterbox_on_hidpi() {
+        // A small HiDPI window: the integer scale clamps to one physical
+        // pixel per game pixel, which is half a logical pixel at scale 2.
+        assert_eq!(
+            presented_logical_size(UVec2::new(1000, 900), 2.0, game_size()),
+            Vec2::new(320.0, 240.0)
         );
     }
 }
