@@ -414,12 +414,14 @@ mod tests {
 
     #[test]
     fn the_shipped_teleporter_pair_is_consistent() {
-        // Both halves must parse, and each side's arrival point must be
-        // walkable and inside the destination's trigger region: the pair
-        // exercises re-arm by arriving inside the return region, which
-        // stays quiet until the player leaves and re-enters.
+        // Both halves must parse, and each side's arrival point must sit
+        // inside the destination's trigger region with the player's whole
+        // body on walkable ground: a point that is on the grid but whose
+        // body overhangs its edge leaves the player stuck (constrain
+        // rejects whole moves, it doesn't step out).
         let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
         let room2: Scene = ron::from_str(include_str!("../assets/scenes/room2.scene")).unwrap();
+        let radius = crate::systems::player::PLAYER_RADIUS;
 
         let [to_room2] = &devroom.teleporters[..] else {
             panic!("devroom ships exactly one test teleporter");
@@ -429,7 +431,7 @@ mod tests {
             .walkable
             .as_ref()
             .expect("room2 needs a walkable grid");
-        assert!(grid2.is_walkable(to_room2.arrival[0], to_room2.arrival[1]));
+        assert!(grid2.is_circle_walkable(to_room2.arrival[0], to_room2.arrival[1], radius));
         let [from_room2] = &room2.teleporters[..] else {
             panic!("room2 ships exactly one return teleporter");
         };
@@ -443,7 +445,7 @@ mod tests {
             .walkable
             .as_ref()
             .expect("devroom needs a walkable grid");
-        assert!(grid1.is_walkable(to_devroom.arrival[0], to_devroom.arrival[1]));
+        assert!(grid1.is_circle_walkable(to_devroom.arrival[0], to_devroom.arrival[1], radius));
         assert!(to_room2.contains(to_devroom.arrival[0], to_devroom.arrival[1]));
     }
 
