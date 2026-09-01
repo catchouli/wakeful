@@ -481,6 +481,52 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_devroom_actor_runs_a_contract_abiding_script() {
+        let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
+        let [actor] = &devroom.actors[..] else {
+            panic!("devroom ships exactly one test actor");
+        };
+        assert_eq!(actor.model, "models/goblin.glb");
+        assert_eq!(actor.script.as_deref(), Some("scripts/test.rhai"));
+        let grid = devroom
+            .walkable
+            .as_ref()
+            .expect("devroom needs a walkable grid");
+        assert!(grid.is_walkable(actor.position[0], actor.position[1]));
+
+        let script =
+            crate::scripts::CompiledScript::compile(include_str!("../assets/scripts/test.rhai"))
+                .expect("the shipped actor script must compile");
+        let mut scope = rhai::Scope::new();
+        // Far from the player it closes in; close by it stays put.
+        let moved = script
+            .update(
+                &mut scope,
+                actor.position[0],
+                actor.position[1],
+                0.0,
+                0.0,
+                1.0 / 60.0,
+            )
+            .unwrap()
+            .expect("the goblin approaches a far player");
+        assert!(moved[0] > actor.position[0] && moved[1] < actor.position[1]);
+        assert_eq!(
+            script
+                .update(
+                    &mut scope,
+                    actor.position[0],
+                    actor.position[1],
+                    actor.position[0],
+                    actor.position[1],
+                    1.0 / 60.0,
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn camera_forward_points_from_the_camera_toward_its_target() {
         // devroom-style: camera above +Z looking at the origin -> -Z.
         let mut scene = devroom_scene();
