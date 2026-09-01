@@ -415,8 +415,9 @@ mod tests {
     #[test]
     fn the_shipped_teleporter_pair_is_consistent() {
         // Both halves must parse, and each side's arrival point must be
-        // walkable and clear of the destination's own triggers, or the
-        // player would bounce straight back.
+        // walkable and inside the destination's trigger region: the pair
+        // exercises re-arm by arriving inside the return region, which
+        // stays quiet until the player leaves and re-enters.
         let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
         let room2: Scene = ron::from_str(include_str!("../assets/scenes/room2.scene")).unwrap();
 
@@ -429,12 +430,10 @@ mod tests {
             .as_ref()
             .expect("room2 needs a walkable grid");
         assert!(grid2.is_walkable(to_room2.arrival[0], to_room2.arrival[1]));
-        assert!(
-            room2
-                .teleporters
-                .iter()
-                .all(|t| !t.contains(to_room2.arrival[0], to_room2.arrival[1]))
-        );
+        let [from_room2] = &room2.teleporters[..] else {
+            panic!("room2 ships exactly one return teleporter");
+        };
+        assert!(from_room2.contains(to_room2.arrival[0], to_room2.arrival[1]));
 
         let [to_devroom] = &room2.teleporters[..] else {
             panic!("room2 ships exactly one return teleporter");
@@ -445,12 +444,7 @@ mod tests {
             .as_ref()
             .expect("devroom needs a walkable grid");
         assert!(grid1.is_walkable(to_devroom.arrival[0], to_devroom.arrival[1]));
-        assert!(
-            devroom
-                .teleporters
-                .iter()
-                .all(|t| !t.contains(to_devroom.arrival[0], to_devroom.arrival[1]))
-        );
+        assert!(to_room2.contains(to_devroom.arrival[0], to_devroom.arrival[1]));
     }
 
     #[test]
