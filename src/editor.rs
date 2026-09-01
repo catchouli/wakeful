@@ -90,7 +90,7 @@ fn save_scene(scene: &Scene, asset_path: &str) -> std::io::Result<PathBuf> {
 
 /// Window cursor position (logical px) mapped into game-texture pixels,
 /// undoing the letterbox math of the present camera (which sizes the
-/// picture in logical units — see `screen::presented_logical_size`).
+/// picture from the logical window size — see `screen::resize_present`).
 /// Returns `None` when the cursor sits on a black bar or outside the window.
 pub fn cursor_to_game(
     cursor_logical: Vec2,
@@ -588,23 +588,28 @@ mod tests {
 
     #[test]
     fn cursor_agrees_with_the_presented_size_on_hidpi() {
-        // Pins cursor_to_game against the sprite sizing of resize_present:
-        // the cursor on the presented picture's top-left corner must sample
-        // game pixel (0, 0), its bottom-right corner (639, 479). Scale 2,
-        // letterboxed window (30-unit bars left/right, 10 top/bottom).
-        let window = UVec2::new(1400, 1000);
+        // Pins cursor_to_game against the sprite sizing of resize_present
+        // (which scales from the logical window size): the cursor on the
+        // presented picture's top-left corner must sample game pixel
+        // (0, 0), and the top-left of the last game pixel (319, 239).
+        let window = UVec2::new(1400, 1000); // physical
         let scale = 2.0;
         let game = screen::game_size();
-        let presented = screen::presented_logical_size(window, scale, game);
-        let offset = (window.as_vec2() / scale - presented) / 2.0;
+        let logical = UVec2::new(
+            (window.x as f32 / scale) as u32,
+            (window.y as f32 / scale) as u32,
+        );
+        let presented = screen::presented_size(logical, game).as_vec2();
+        let offset = (logical.as_vec2() - presented) / 2.0;
+        let game_pixel = presented / game.as_vec2();
 
         assert_eq!(
             cursor_to_game(offset, scale, window, game),
             Some(Vec2::ZERO)
         );
         assert_eq!(
-            cursor_to_game(offset + presented - Vec2::ONE, scale, window, game),
-            Some(Vec2::new(639.0, 479.0))
+            cursor_to_game(offset + presented - game_pixel, scale, window, game),
+            Some(Vec2::new(319.0, 239.0))
         );
     }
 

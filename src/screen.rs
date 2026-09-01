@@ -13,8 +13,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::window::PrimaryWindow;
 
 /// Virtual resolution the whole game is rendered at.
-pub const GAME_WIDTH: u32 = 640;
-pub const GAME_HEIGHT: u32 = 480;
+pub const GAME_WIDTH: u32 = 320;
+pub const GAME_HEIGHT: u32 = 240;
 
 /// Size of the offscreen texture as a window-size vector.
 pub fn game_size() -> UVec2 {
@@ -33,17 +33,6 @@ pub fn integer_scale(window: UVec2, game: UVec2) -> u32 {
 /// Window-space size of the presented game image.
 pub fn presented_size(window: UVec2, game: UVec2) -> UVec2 {
     game * integer_scale(window, game)
-}
-
-/// Size of the presented game image in the present camera's world units.
-///
-/// Those units are logical pixels, not physical ones, so the physical
-/// derived size is divided by the scale factor. Skipping that division
-/// renders the picture `scale_factor`x too large on HiDPI displays, which
-/// crops it to its center and skews every cursor mapping built on the
-/// letterbox math.
-pub fn presented_logical_size(window: UVec2, scale_factor: f32, game: UVec2) -> Vec2 {
-    presented_size(window, game).as_vec2() / scale_factor
 }
 
 #[derive(Component)]
@@ -102,11 +91,11 @@ pub fn resize_present(
         return;
     };
 
-    sprite.custom_size = Some(presented_logical_size(
-        window.physical_size(),
-        window.scale_factor(),
-        game_size(),
-    ));
+    // Sprite sizes are logical units, so scale from the logical window
+    // size; physical pixels would over-size the image on scaled displays.
+    let logical = UVec2::new(window.width() as u32, window.height() as u32);
+    let size = presented_size(logical, game_size()).as_vec2();
+    sprite.custom_size = Some(size);
 }
 
 #[cfg(test)]
@@ -115,19 +104,19 @@ mod tests {
 
     #[test]
     fn scales_to_exact_multiple() {
-        assert_eq!(integer_scale(UVec2::new(1280, 960), game_size()), 2);
+        assert_eq!(integer_scale(UVec2::new(1280, 960), game_size()), 4);
     }
 
     #[test]
     fn fits_the_smaller_axis() {
-        // width allows 3x but height only 2x
-        assert_eq!(integer_scale(UVec2::new(1920, 1080), game_size()), 2);
+        // width allows 6x but height only 4x
+        assert_eq!(integer_scale(UVec2::new(1920, 1080), game_size()), 4);
     }
 
     #[test]
     fn never_scales_below_one() {
         assert_eq!(integer_scale(UVec2::new(300, 200), game_size()), 1);
-        assert_eq!(integer_scale(UVec2::new(1000, 900), game_size()), 1);
+        assert_eq!(integer_scale(UVec2::new(500, 400), game_size()), 1);
     }
 
     #[test]
@@ -139,30 +128,26 @@ mod tests {
     }
 
     #[test]
-    fn logical_size_matches_physical_at_scale_one() {
-        assert_eq!(
-            presented_logical_size(UVec2::new(1000, 900), 1.0, game_size()),
-            Vec2::new(640.0, 480.0)
-        );
-    }
+    fn resize_present_sizes_the_sprite_in_logical_units() {
+        use bevy::ecs::system::RunSystemOnce;
 
-    #[test]
-    fn logical_size_fills_a_hidpi_window() {
-        // Exact-multiple Retina window: the picture fills the window and
-        // each game pixel covers two physical pixels.
-        assert_eq!(
-            presented_logical_size(UVec2::new(1280, 960), 2.0, game_size()),
-            Vec2::new(640.0, 480.0)
-        );
-    }
+        // A scale-2 (Retina) window: physical 1280x960, logical 640x480.
+        // Sizing the sprite from physical pixels over-sizes it 2x, which
+        // crops the picture and skews cursor mapping.
+        let mut world = World::new();
+        world.spawn((
+            PrimaryWindow,
+            Window {
+                resolution: bevy::window::WindowResolution::new(1280, 960)
+                    .with_scale_factor_override(2.0),
+                ..default()
+            },
+        ));
+        let sprite_entity = world.spawn((PresentSprite, Sprite::default())).id();
 
-    #[test]
-    fn logical_size_keeps_the_letterbox_on_hidpi() {
-        // A small HiDPI window: the integer scale clamps to one physical
-        // pixel per game pixel, which is half a logical pixel at scale 2.
-        assert_eq!(
-            presented_logical_size(UVec2::new(1000, 900), 2.0, game_size()),
-            Vec2::new(320.0, 240.0)
-        );
+        world.run_system_once(resize_present).unwrap();
+
+        let size = world.get::<Sprite>(sprite_entity).unwrap().custom_size;
+        assert_eq!(size, Some(Vec2::new(640.0, 480.0)));
     }
 }

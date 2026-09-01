@@ -1,9 +1,11 @@
+mod dither;
 mod editor;
 mod movement;
 mod scene;
 mod screen;
 mod systems;
 
+use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
@@ -75,6 +77,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
+        .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
         .add_plugins(editor::plugin)
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
