@@ -62,13 +62,14 @@ pub fn move_player(
     let from = transform.translation.xz();
     let moved = move_position(from, direction, PLAYER_SPEED, time.delta_secs());
 
-    // The scene's walkable grid bounds where the player may go; sliding
-    // along blocked cells keeps movement feeling responsive.
+    // The scene's walkable grid bounds where the player may go; the body
+    // (not just the center point) stays inside, and sliding along blocked
+    // cells keeps movement feeling responsive.
     let moved = current
         .as_ref()
         .and_then(|c| scenes.get(&c.handle))
         .and_then(|scene| scene.walkable.as_ref())
-        .map(|grid| grid.constrain(from, moved))
+        .map(|grid| grid.constrain(from, moved, PLAYER_RADIUS))
         .unwrap_or(moved);
 
     transform.translation = Vec3::new(moved.x, PLAYER_Y, moved.y);
