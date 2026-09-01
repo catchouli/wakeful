@@ -17,7 +17,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use crate::scene::{CameraPose, Scene, WalkableGrid};
 use crate::screen;
 use crate::systems::debug_draw::draw_walkable_grid;
-use crate::systems::scene::spawn_background;
+use crate::systems::scene::{gltf_asset_path, spawn_background};
 use crate::{BackgroundSprite, CurrentScene, GameCamera, GameCameraQuery, Player, PlayerModel};
 
 /// Read-only camera access for picking rays in the editor.
@@ -344,7 +344,7 @@ fn character_ui(
     assets: &AssetServer,
     players: &Query<Entity, With<Player>>,
 ) {
-    ui.label("Character model (glTF scene, empty = capsule)");
+    ui.label("Character model (glTF path under assets/, empty = capsule)");
     ui.text_edit_singleline(field);
     if ui.button("Apply").clicked() {
         let path = trimmed_path(field);
@@ -357,7 +357,7 @@ fn character_ui(
             }
             commands.remove_resource::<PlayerModel>();
             if let Some(path) = &scene.character_model {
-                commands.insert_resource(PlayerModel(assets.load(path)));
+                commands.insert_resource(PlayerModel(assets.load(gltf_asset_path(path))));
             }
         }
     }

@@ -4,9 +4,9 @@ mod scene;
 mod screen;
 mod systems;
 
+use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
-use bevy::world_serialization::WorldAsset;
 use bevy_common_assets::ron::RonAssetPlugin;
 
 use crate::scene::Scene;
@@ -55,7 +55,7 @@ struct SceneApplied(bool);
 /// Character model queued for the player, held until its glTF finishes
 /// loading; `apply_player_model` removes it once applied.
 #[derive(Resource)]
-struct PlayerModel(Handle<WorldAsset>);
+struct PlayerModel(Handle<Gltf>);
 
 type GameCameraQuery<'w, 's> = Query<
     'w,

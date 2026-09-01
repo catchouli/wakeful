@@ -3,8 +3,8 @@
 
 use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
+use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::world_serialization::WorldAsset;
 
 use crate::scene::Scene;
 use crate::screen;
@@ -76,7 +76,7 @@ pub fn apply_scene(
     }
 
     if let Some(path) = &scene.character_model {
-        commands.insert_resource(PlayerModel(assets.load(path)));
+        commands.insert_resource(PlayerModel(assets.load(gltf_asset_path(path))));
     }
 
     applied.0 = true;
@@ -98,6 +98,16 @@ pub(crate) fn spawn_background(commands: &mut Commands, assets: &AssetServer, pa
         },
         RenderLayers::layer(BG_LAYER),
     ));
+}
+
+/// Strips a `#SceneN` sub-asset suffix from a character-model path: the
+/// model's default scene is used regardless. Scene files written when the
+/// suffix was part of the contract keep loading.
+pub(crate) fn gltf_asset_path(path: &str) -> String {
+    match path.split_once('#') {
+        Some((base, _)) => base.to_owned(),
+        None => path.to_owned(),
+    }
 }
 
 /// Hides the placeholder ground while the scene shows a pre-rendered
@@ -127,15 +137,23 @@ pub fn sync_ground(
 pub fn apply_player_model(
     mut commands: Commands,
     model: Option<Res<PlayerModel>>,
-    scenes: Res<Assets<WorldAsset>>,
+    gltfs: Res<Assets<Gltf>>,
     mut players: Query<Entity, With<Player>>,
 ) {
     let Some(model) = model else {
         return;
     };
-    if scenes.get(&model.0).is_none() {
+    let Some(gltf) = gltfs.get(&model.0) else {
         return;
-    }
+    };
+    // The file's default scene; the first one if the glTF declares none.
+    let Some(scene) = gltf
+        .default_scene
+        .clone()
+        .or_else(|| gltf.scenes.first().cloned())
+    else {
+        return;
+    };
     let Ok(player) = players.single_mut() else {
         return;
     };
@@ -143,7 +161,7 @@ pub fn apply_player_model(
         .entity(player)
         .remove::<Mesh3d>()
         .remove::<MeshMaterial3d<StandardMaterial>>()
-        .with_child((WorldAssetRoot(model.0.clone()), Transform::default()));
+        .with_child((WorldAssetRoot(scene), Transform::default()));
     commands.remove_resource::<PlayerModel>();
 }
 
@@ -179,6 +197,16 @@ mod tests {
         });
         let ground = world.spawn((Ground, Visibility::default())).id();
         (world, ground)
+    }
+
+    #[test]
+    fn gltf_paths_drop_the_scene_suffix() {
+        assert_eq!(gltf_asset_path("elf.glb"), "elf.glb");
+        assert_eq!(
+            gltf_asset_path("models/hero.gltf#Scene0"),
+            "models/hero.gltf"
+        );
+        assert_eq!(gltf_asset_path("models/hero.glb#Scene0"), "models/hero.glb");
     }
 
     #[test]
