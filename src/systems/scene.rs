@@ -8,7 +8,9 @@ use bevy::world_serialization::WorldAsset;
 
 use crate::scene::Scene;
 use crate::screen;
-use crate::{BackgroundSprite, CurrentScene, GameCameraQuery, Player, PlayerModel, SceneApplied};
+use crate::{
+    BackgroundSprite, CurrentScene, GameCameraQuery, Ground, Player, PlayerModel, SceneApplied,
+};
 
 /// Camera layer that draws the pre-rendered background image.
 const BG_LAYER: usize = 2;
@@ -98,6 +100,28 @@ pub(crate) fn spawn_background(commands: &mut Commands, assets: &AssetServer, pa
     ));
 }
 
+/// Hides the placeholder ground while the scene shows a pre-rendered
+/// background, and brings it back when the background is cleared. Runs
+/// every frame so live editor edits react immediately.
+pub fn sync_ground(
+    scenes: Res<Assets<Scene>>,
+    current: Option<Res<CurrentScene>>,
+    mut grounds: Query<&mut Visibility, With<Ground>>,
+) {
+    let has_background = current
+        .as_ref()
+        .and_then(|c| scenes.get(&c.handle))
+        .is_some_and(|scene| scene.background.is_some());
+    let Ok(mut visibility) = grounds.single_mut() else {
+        return;
+    };
+    *visibility = if has_background {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+}
+
 /// Swaps the placeholder capsule for the scene's character model once the
 /// glTF file has loaded.
 pub fn apply_player_model(
@@ -121,4 +145,63 @@ pub fn apply_player_model(
         .remove::<MeshMaterial3d<StandardMaterial>>()
         .with_child((WorldAssetRoot(model.0.clone()), Transform::default()));
     commands.remove_resource::<PlayerModel>();
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
+    use crate::scene::CameraPose;
+
+    use super::*;
+
+    fn test_scene(background: Option<&str>) -> Scene {
+        Scene {
+            background: background.map(str::to_string),
+            camera: CameraPose {
+                position: [0.0, 6.0, 9.0],
+                target: [0.0, 0.0, 0.0],
+                fov_degrees: 45.0,
+            },
+            walkable: None,
+            character_model: None,
+        }
+    }
+
+    fn world_with_scene(background: Option<&str>) -> (World, Entity) {
+        let mut world = World::new();
+        let mut assets = Assets::<Scene>::default();
+        let handle = assets.add(test_scene(background));
+        world.insert_resource(assets);
+        world.insert_resource(CurrentScene {
+            handle,
+            path: "scenes/devroom.scene",
+        });
+        let ground = world.spawn((Ground, Visibility::default())).id();
+        (world, ground)
+    }
+
+    #[test]
+    fn ground_hides_while_a_background_is_set() {
+        let (mut world, ground) = world_with_scene(Some("backgrounds/room.png"));
+        world.run_system_once(sync_ground).unwrap();
+        assert_eq!(world.get::<Visibility>(ground), Some(&Visibility::Hidden));
+    }
+
+    #[test]
+    fn ground_returns_when_the_background_is_cleared() {
+        let (mut world, ground) = world_with_scene(None);
+        world.entity_mut(ground).insert(Visibility::Hidden);
+        world.run_system_once(sync_ground).unwrap();
+        assert_eq!(world.get::<Visibility>(ground), Some(&Visibility::Visible));
+    }
+
+    #[test]
+    fn ground_stays_visible_without_a_scene() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Scene>::default());
+        let ground = world.spawn((Ground, Visibility::default())).id();
+        world.run_system_once(sync_ground).unwrap();
+        assert_eq!(world.get::<Visibility>(ground), Some(&Visibility::Visible));
+    }
 }

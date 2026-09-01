@@ -25,6 +25,11 @@ struct Player;
 #[derive(Component)]
 struct GameCamera;
 
+/// Marks the placeholder ground plane; hidden while the scene shows a
+/// pre-rendered background.
+#[derive(Component)]
+struct Ground;
+
 /// Sprite spawned for the scene's background image; the editor despawns
 /// and respawns these when the background path changes.
 #[derive(Component)]
@@ -90,6 +95,7 @@ fn main() {
                 input::quit_on_escape,
                 screen::resize_present,
                 scene_loader::apply_scene,
+                scene_loader::sync_ground,
                 scene_loader::apply_player_model,
                 debug_draw::debug_draw_walkables,
             ),
