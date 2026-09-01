@@ -21,6 +21,10 @@ pub struct Scene {
     /// Trigger rects that load another scene when the player touches one.
     #[serde(default)]
     pub teleporters: Vec<Teleporter>,
+    /// Characters placed in the scene: a model, a ground position, and an
+    /// optional Rhai script that moves them each tick.
+    #[serde(default)]
+    pub actors: Vec<Actor>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy)]
@@ -52,6 +56,21 @@ impl Teleporter {
         (self.position[0] - half_x..self.position[0] + half_x).contains(&x)
             && (self.position[1] - half_z..self.position[1] + half_z).contains(&z)
     }
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
+pub struct Actor {
+    /// glTF model path relative to `assets/`, with the same rules as
+    /// `Scene::character_model` (default scene used, `#SceneN` ignored).
+    pub model: String,
+    /// Ground-plane XZ position.
+    pub position: [f32; 2],
+    /// Rhai script file relative to `assets/`. The script's
+    /// `on_update(x, z, player_x, player_z, dt)` runs every fixed tick;
+    /// returning `[x, z]` moves the actor there, returning nothing keeps
+    /// it put.
+    #[serde(default)]
+    pub script: Option<String>,
 }
 
 impl Scene {
@@ -394,6 +413,7 @@ mod tests {
                 target: "scenes/room2.scene".into(),
                 arrival: [1.0, 2.0],
             }],
+            actors: Vec::new(),
         };
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
         let reparsed: Scene = ron::from_str(&text).unwrap();
@@ -485,7 +505,64 @@ mod tests {
             walkable: None,
             character_model: None,
             teleporters: Vec::new(),
+            actors: Vec::new(),
         }
+    }
+
+    #[test]
+    fn parses_actors() {
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walkable: None,
+            character_model: None,
+            actors: [
+                (
+                    model: "models/goblin.glb",
+                    position: (1.0, 2.0),
+                    script: Some("scripts/goblin.rhai"),
+                ),
+                (
+                    model: "models/statue.glb",
+                    position: (3.0, 4.0),
+                ),
+            ],
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        let [with_script, without] = &scene.actors[..] else {
+            panic!("expected exactly two actors");
+        };
+        assert_eq!(with_script.model, "models/goblin.glb");
+        assert_eq!(with_script.position, [1.0, 2.0]);
+        assert_eq!(with_script.script.as_deref(), Some("scripts/goblin.rhai"));
+        assert_eq!(without.model, "models/statue.glb");
+        assert_eq!(without.position, [3.0, 4.0]);
+        assert_eq!(without.script, None);
+    }
+
+    #[test]
+    fn actors_default_to_empty_when_omitted() {
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walkable: None,
+            character_model: None,
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert!(scene.actors.is_empty());
+    }
+
+    #[test]
+    fn actors_round_trip_through_ron() {
+        let mut scene = devroom_scene();
+        scene.actors = vec![Actor {
+            model: "models/goblin.glb".into(),
+            position: [1.0, 2.0],
+            script: Some("scripts/goblin.rhai".into()),
+        }];
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        let reparsed: Scene = ron::from_str(&text).unwrap();
+        assert_eq!(reparsed.actors, scene.actors);
     }
 
     #[test]
