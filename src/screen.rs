@@ -64,14 +64,18 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(GameImage(handle.clone()));
 
     // The present camera owns the window: black bars, then the texture.
-    // Order 2 = after the background (0) and 3D (1) cameras.
+    // Order 3 = after the background (0), 3D (1), and bubble (2) cameras.
     commands.spawn((
         Camera2d,
         Camera {
-            order: 2,
+            order: 3,
             clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
+        // Explicit off like every other camera: the component default is
+        // 4x MSAA, which mismatches the single-sampled game image when a
+        // 2d pass gains a depth attachment.
+        Msaa::Off,
         RenderLayers::layer(1),
         PresentSprite,
         Sprite {
