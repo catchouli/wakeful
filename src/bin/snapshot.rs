@@ -27,9 +27,19 @@ use bevy::window::{ExitCondition, WindowPlugin};
 #[path = "../dither.rs"]
 mod dither;
 
-// Mirrors the game's virtual resolution in `screen.rs`.
-const WIDTH: u32 = 320;
-const HEIGHT: u32 = 240;
+// Shares the virtual-resolution target and the speech-bubble pipeline
+// with the main game binary. The present-camera half of screen.rs only
+// matters in the windowed game, hence the allow.
+#[allow(dead_code)]
+#[path = "../screen.rs"]
+mod screen;
+
+#[allow(dead_code)]
+#[path = "../systems/bubble.rs"]
+mod bubble;
+
+/// Handle to the texture the game camera renders into.
+use screen::GameImage;
 
 const PLAYER_RADIUS: f32 = 0.4;
 const PLAYER_LENGTH: f32 = 1.2;
@@ -39,16 +49,12 @@ const GROUND_SIZE: f32 = 30.0;
 const PLAYER_COLOR: Color = Color::srgb(0.949, 0.651, 0.306);
 const GROUND_COLOR: Color = Color::srgb(0.23, 0.21, 0.28);
 
-/// Handle to the texture the game camera renders into.
-#[derive(Resource)]
-struct GameImage(Handle<Image>);
-
 /// A virtual-resolution render target the game camera draws into.
 fn target_image() -> Image {
     let mut image = Image::new_fill(
         Extent3d {
-            width: WIDTH,
-            height: HEIGHT,
+            width: screen::GAME_WIDTH,
+            height: screen::GAME_HEIGHT,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -84,8 +90,16 @@ fn main() {
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(16)))
         .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
         .add_observer(on_captured(output))
-        .add_systems(Startup, setup_scene)
-        .add_systems(Update, (capture_soon, exit_soon))
+        .add_systems(Startup, (setup_scene, bubble::setup, spawn_bubble).chain())
+        .add_systems(
+            Update,
+            (
+                capture_soon,
+                exit_soon,
+                bubble::fit_bubbles,
+                bubble::animate_bubbles,
+            ),
+        )
         .run();
 }
 
@@ -106,13 +120,12 @@ fn setup_scene(
     let scene_image = images.add(target_image());
     commands.insert_resource(GameImage(scene_image.clone()));
 
-    // The dither pass runs after this camera's 3D pass, dithering the
-    // finished frame in place before the screenshot reads it back.
+    // No dither here anymore: the bubble camera carries the dither pass,
+    // so it runs over background, 3D, and bubbles combined.
     commands.spawn((
         Camera3d::default(),
         Msaa::Off,
         RenderTarget::Image(scene_image.into()),
-        dither::DitherPostProcess { ..dither::tuned() },
         Transform::from_xyz(0.0, 6.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
@@ -142,6 +155,21 @@ fn setup_scene(
         Transform::from_xyz(0.0, PLAYER_Y, 0.0)
             .with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::NEG_Z)),
     ));
+}
+
+/// Spawns one open-ended bubble over the scene, so the snapshot shows
+/// the box, the tail, and the text together.
+fn spawn_bubble(mut commands: Commands, assets: Res<bubble::BubbleAssets>) {
+    bubble::spawn_bubble(
+        &mut commands,
+        &assets,
+        bubble::BubbleParams {
+            text: "Over here!".into(),
+            at: Vec2::new(screen::GAME_WIDTH as f32 / 2.0, 70.0),
+            tail: Some(Vec2::NEG_Y),
+            ttl: None,
+        },
+    );
 }
 
 fn capture_soon(
