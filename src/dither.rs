@@ -8,6 +8,10 @@
 //! include it via `#[path]`.
 
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterial;
+use bevy::core_pipeline::tonemapping::tonemapping;
+use bevy::core_pipeline::{Core2d, Core2dSystems};
+use bevy::ecs::schedule::{IntoScheduleConfigs, ScheduleConfigs, ScheduleLabel};
+use bevy::ecs::system::BoxedSystem;
 use bevy::prelude::*;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::ShaderType;
@@ -29,6 +33,19 @@ pub struct DitherPostProcess {
 impl FullscreenMaterial for DitherPostProcess {
     fn fragment_shader() -> ShaderRef {
         "shaders/dither_post_process.wgsl".into()
+    }
+
+    // The bubble camera is a Camera2d, so the pass must run in the 2d
+    // graph: the default Core3d schedule never touches 2d views, which
+    // silently dropped the dither.
+    fn schedule() -> impl ScheduleLabel + Clone {
+        Core2d
+    }
+
+    fn schedule_configs(system: ScheduleConfigs<BoxedSystem>) -> ScheduleConfigs<BoxedSystem> {
+        system
+            .in_set(Core2dSystems::PostProcess)
+            .before(tonemapping)
     }
 }
 
