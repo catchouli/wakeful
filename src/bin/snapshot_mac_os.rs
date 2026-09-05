@@ -1,11 +1,12 @@
 //! Headless render snapshot: renders the game scene into the offscreen
 //! 320x240 texture without any OS window, then saves that texture as a PNG.
 //!
-//! Used to visually verify rendering changes on machines without a display
-//! (CI, sandboxes, remote shells). Run with a software GL setup, e.g.:
+//! Written for and verified on macOS; it doesn't render correctly on
+//! every host, so validate its output against the live game before
+//! trusting it elsewhere.
 //!
 //! ```sh
-//! DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=gl cargo run --bin snapshot -- out.png
+//! cargo run --bin snapshot_mac_os -- out.png
 //! ```
 //!
 //! The scene here mirrors `main.rs`; if it grows, move shared scene setup
@@ -72,7 +73,7 @@ fn target_image() -> Image {
 fn main() {
     let output = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "snapshot.png".into());
+        .unwrap_or_else(|| "snapshot_mac_os.png".into());
 
     App::new()
         .add_plugins(

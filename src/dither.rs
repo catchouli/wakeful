@@ -5,8 +5,8 @@
 //! background, 3D content, and UI, dithering the finished frame in
 //! place.
 //!
-//! This module has no in-crate dependencies so the `snapshot` binary can
-//! include it via `#[path]`.
+//! This module has no in-crate dependencies so the `snapshot_mac_os`
+//! binary can include it via `#[path]`.
 
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterial;
 use bevy::core_pipeline::tonemapping::tonemapping;

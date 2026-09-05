@@ -72,7 +72,7 @@ pub(crate) struct UiCamera;
 pub(crate) struct PostProcessCamera;
 
 /// Spawns the UI camera. Separate from [`setup_screen`] so the headless
-/// snapshot binary can share it against its own game image.
+/// snapshot_mac_os binary can share it against its own game image.
 pub(crate) fn spawn_ui_camera(commands: &mut Commands, game_image: &Handle<Image>) {
     commands.spawn((
         UiCamera,
@@ -89,7 +89,7 @@ pub(crate) fn spawn_ui_camera(commands: &mut Commands, game_image: &Handle<Image
 }
 
 /// Spawns the post-process camera. Separate from [`setup_screen`] so the
-/// headless snapshot binary can share it against its own game image.
+/// headless snapshot_mac_os binary can share it against its own game image.
 pub(crate) fn spawn_post_process_camera(commands: &mut Commands, game_image: &Handle<Image>) {
     commands.spawn((
         PostProcessCamera,
