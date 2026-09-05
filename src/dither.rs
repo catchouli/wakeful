@@ -1,8 +1,9 @@
 //! PSX-style ordered dithering as a fullscreen post-process.
 //!
-//! The material is attached to the bubble camera — the last camera that
-//! draws into the game image — so the pass runs after the background, 3D
-//! content, and speech bubbles, dithering the finished frame in place.
+//! The material is attached to the post-process camera — the last
+//! camera that draws into the game image — so the pass runs over the
+//! background, 3D content, and UI, dithering the finished frame in
+//! place.
 //!
 //! This module has no in-crate dependencies so the `snapshot` binary can
 //! include it via `#[path]`.

@@ -96,6 +96,7 @@ fn main() {
             (
                 capture_soon,
                 exit_soon,
+                screen::validate_post_process_layout,
                 bubble::fit_bubbles,
                 bubble::animate_bubbles,
             ),
@@ -120,8 +121,11 @@ fn setup_scene(
     let scene_image = images.add(target_image());
     commands.insert_resource(GameImage(scene_image.clone()));
 
-    // No dither here anymore: the bubble camera carries the dither pass,
-    // so it runs over background, 3D, and bubbles combined.
+    screen::spawn_ui_camera(&mut commands, &scene_image);
+    screen::spawn_post_process_camera(&mut commands, &scene_image);
+
+    // No dither on this camera: the post-process camera applies it over
+    // background, 3D, and UI combined.
     commands.spawn((
         Camera3d::default(),
         Msaa::Off,

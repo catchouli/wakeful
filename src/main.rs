@@ -129,6 +129,7 @@ fn main() {
             (
                 input::quit_on_escape,
                 screen::resize_present,
+                screen::validate_post_process_layout,
                 scene_loader::apply_scene,
                 scene_loader::sync_ground,
                 scene_loader::apply_player_model,

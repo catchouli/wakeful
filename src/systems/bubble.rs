@@ -2,21 +2,16 @@
 //! screen, with an optional tail pointing at the speaker, and a
 //! grow-from-center / shrink-to-center animation.
 //!
-//! The bubble camera renders into the game image after background and 3D
-//! content and carries the dither pass, so bubbles get the same PSX-era
-//! treatment as the rest of the frame.
+//! Bubbles render on the UI layer (`screen.rs`), over the background and
+//! 3D content; the post-process camera then applies the same PSX-era
+//! dithering to them as the rest of the frame.
 
-use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
 use bevy::math::primitives::{Rectangle, Triangle2d};
 use bevy::prelude::*;
 use bevy::text::TextLayoutInfo;
 
-use crate::dither::{self, DitherPostProcess};
-use crate::screen::{GAME_HEIGHT, GAME_WIDTH, GameImage};
-
-/// Render layer only the bubble camera looks at; nothing else shares it.
-const BUBBLE_LAYER: usize = 3;
+use crate::screen::{GAME_HEIGHT, GAME_WIDTH, UI_LAYER};
 
 /// Draw order inside a bubble, back to front: black border box, black
 /// tail, white fill box, white tail inset, text on top.
@@ -107,30 +102,12 @@ pub(crate) struct BubbleParams {
     pub ttl: Option<f32>,
 }
 
-/// Spawns the bubble camera and the shared shape/material handles.
-///
-/// Camera order 2 = after the background (0) and 3D (1) cameras, so the
-/// dither pass it carries runs over background, 3D, and bubbles
-/// combined. MSAA is off so the pass can sample the image directly.
+/// Builds the shared shape/material handles bubbles draw with.
 pub(crate) fn setup(
     mut commands: Commands,
-    game_image: Res<GameImage>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn((
-        Camera2d,
-        Camera {
-            order: 2,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        Msaa::Off,
-        DitherPostProcess { ..dither::tuned() },
-        RenderTarget::Image(game_image.0.clone().into()),
-        RenderLayers::layer(BUBBLE_LAYER),
-    ));
-
     let (rect, tail, tail_inset) = add_meshes(&mut meshes);
     let (black, white) = add_materials(&mut materials);
 
@@ -195,9 +172,9 @@ pub(crate) fn spawn_bubble(
         .tail
         .filter(|d| *d != Vec2::ZERO)
         .map(Vec2::normalize);
-    // RenderLayers doesn't propagate to children, and the bubble camera
-    // only looks at BUBBLE_LAYER — every renderable child needs it.
-    let layers = RenderLayers::layer(BUBBLE_LAYER);
+    // RenderLayers doesn't propagate to children, and the UI camera
+    // only looks at UI_LAYER — every renderable child needs it.
+    let layers = RenderLayers::layer(UI_LAYER);
     let text = commands
         .spawn((
             Text2d::new(params.text),
