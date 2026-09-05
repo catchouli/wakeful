@@ -11,8 +11,8 @@ use crate::Player;
 use crate::editor::assets_root;
 use crate::movement::{TURN_SPEED, face_direction, facing_rotation};
 use crate::scene::Scene;
-use crate::scripts::CompiledScript;
-use crate::systems::bubble;
+use crate::scripts::{CompiledScript, Said};
+use crate::systems::bubble::{self, BubbleTheme};
 use crate::systems::scene::gltf_asset_path;
 use crate::text::TextAssets;
 
@@ -29,8 +29,9 @@ pub struct Actor {
     script: Option<ScriptRuntime>,
     /// The bubble showing the actor's last line, replaced per `say`.
     bubble: Option<Entity>,
-    /// The line currently in that bubble, to dedupe per-tick repeats.
-    said: Option<String>,
+    /// The line (and its options) currently in that bubble, to dedupe
+    /// per-tick repeats.
+    said: Option<Said>,
 }
 
 /// A compiled script and its persistent variable scope.
@@ -126,12 +127,13 @@ pub(crate) fn attach_actor_models(
     }
 }
 
-/// The optional UI assets speech needs: both resources are absent
-/// until their `setup` systems have run.
+/// The optional UI assets speech needs: the resources are absent until
+/// their `setup` systems have run.
 #[derive(SystemParam)]
 pub(crate) struct UiAssets<'w> {
     bubbles: Option<Res<'w, bubble::BubbleAssets>>,
     text: Option<Res<'w, TextAssets>>,
+    theme: Option<Res<'w, BubbleTheme>>,
 }
 
 /// Runs each actor's `on_update`, applies the returned position, and
@@ -153,10 +155,19 @@ pub(crate) fn run_actor_scripts(
     let dt = time.delta_secs();
     let camera = cameras.single().ok();
     for (entity, mut transform, mut actor) in &mut actors {
+        let position = &transform.translation;
+        // The script polls waiting() to hold its place while the player
+        // hasn't confirmed its wait-mode bubble yet. Computed before the
+        // script runtime borrows the actor mutably.
+        let waiting = actor.bubble.is_some_and(|bubble| {
+            bubbles
+                .get(bubble)
+                .is_ok_and(|bubble| bubble.is_waiting() && bubble.is_open())
+        });
         let Some(runtime) = actor.script.as_mut() else {
             continue;
         };
-        let position = &transform.translation;
+        runtime.script.set_waiting(waiting);
         match runtime.script.update(
             &mut runtime.scope,
             position.x,
@@ -180,15 +191,20 @@ pub(crate) fn run_actor_scripts(
                             .world_to_viewport(camera_transform, transform.translation)
                             .ok()
                     });
-                    say(
-                        &mut commands,
-                        &mut bubbles,
-                        ui_assets.bubbles.as_deref(),
-                        ui_assets.text.as_deref(),
-                        &mut actor,
-                        at_screen,
-                        tick.said.join(" "),
-                    );
+                    for said in &tick.said {
+                        say(
+                            &mut commands,
+                            &mut bubbles,
+                            SpeechHandles {
+                                assets: ui_assets.bubbles.as_deref(),
+                                text_assets: ui_assets.text.as_deref(),
+                                theme: ui_assets.theme.as_deref(),
+                            },
+                            &mut actor,
+                            at_screen,
+                            said,
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -199,21 +215,35 @@ pub(crate) fn run_actor_scripts(
     }
 }
 
-/// Shows `line` in a timed bubble at the actor's on-screen point.
-/// `None` — off-screen, or no camera — drops the line for this tick;
-/// a still-visible script can say it again. Repeating the current line
-/// keeps the open bubble steady instead of restarting its animation.
+/// Speech's optional handles, gathered from [`UiAssets`] at the call
+/// site so `say` stays under the argument-count lint.
+struct SpeechHandles<'a> {
+    assets: Option<&'a bubble::BubbleAssets>,
+    text_assets: Option<&'a TextAssets>,
+    theme: Option<&'a BubbleTheme>,
+}
+
+/// Shows a said line in a bubble. Without `at`, the bubble floats above
+/// the actor's on-screen point with a downward tail; with it, the line
+/// lands at that virtual-screen position, tailless unless the script
+/// aims one. `None` — off-screen, or no camera — drops an anchored line
+/// for this tick; a still-visible script says it again. Repeating the
+/// exact same line keeps the open bubble steady instead of restarting
+/// its animation.
 fn say(
     commands: &mut Commands,
     bubbles: &mut Query<&mut bubble::SpeechBubble>,
-    assets: Option<&bubble::BubbleAssets>,
-    text_assets: Option<&TextAssets>,
+    handles: SpeechHandles<'_>,
     actor: &mut Actor,
     at_screen: Option<Vec2>,
-    line: String,
+    said: &Said,
 ) {
-    let (Some(assets), Some(text_assets), Some(at_screen)) = (assets, text_assets, at_screen)
-    else {
+    let (Some(assets), Some(text_assets), Some(theme), Some(at_screen)) = (
+        handles.assets,
+        handles.text_assets,
+        handles.theme,
+        at_screen,
+    ) else {
         return;
     };
     // Repeating the line that's already up keeps that bubble steady
@@ -223,7 +253,7 @@ fn say(
         Some(entity) => bubbles.get(entity).is_ok(),
         None => false,
     };
-    if steady && actor.said.as_deref() == Some(line.as_str()) {
+    if steady && actor.said.as_ref() == Some(said) {
         return;
     }
     if let Some(old) = actor.bubble
@@ -231,18 +261,43 @@ fn say(
     {
         bubble::dismiss_bubble(&mut old_bubble);
     }
+    let free = said.at.is_some();
+    let at = said
+        .at
+        .map_or(at_screen - Vec2::Y * SAY_HEADROOM_PX, |[x, y]| {
+            Vec2::new(x, y)
+        });
+    let tail = if said.no_tail {
+        None
+    } else {
+        match said.tail {
+            Some([x, y]) => Some(Vec2::new(x, y)),
+            None if free => None,
+            None => Some(Vec2::NEG_Y),
+        }
+    };
+    // Wait-mode bubbles stay until confirmed unless the script also
+    // sets a ttl; plain says close themselves after the default time.
+    let ttl = if said.wait {
+        said.ttl.map(|secs| secs as f32)
+    } else {
+        Some(said.ttl.map_or(SAY_TTL_SECS, |secs| secs as f32))
+    };
     actor.bubble = Some(bubble::spawn_bubble(
         commands,
         assets,
         text_assets,
+        theme,
         bubble::BubbleParams {
-            text: line.clone(),
-            at: at_screen - Vec2::Y * SAY_HEADROOM_PX,
-            tail: Some(Vec2::NEG_Y),
-            ttl: Some(SAY_TTL_SECS),
+            text: said.text.clone(),
+            at,
+            tail,
+            free,
+            ttl,
+            wait: said.wait,
         },
     ));
-    actor.said = Some(line);
+    actor.said = Some(said.clone());
 }
 
 #[cfg(test)]
@@ -400,9 +455,11 @@ mod tests {
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<bubble::GradientMaterial>::default());
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
         world.insert_resource(text::test_assets());
+        world.insert_resource(bubble::BubbleTheme::default());
         world.spawn((Player, Transform::default()));
         // A targetless camera with pre-seeded render values: eye at the
         // origin looking -Z, 90-degree square perspective. The actor at
@@ -439,9 +496,11 @@ mod tests {
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<bubble::GradientMaterial>::default());
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
         world.insert_resource(text::test_assets());
+        world.insert_resource(bubble::BubbleTheme::default());
         world.spawn((Player, Transform::default()));
         let mut camera = Camera::default();
         camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
@@ -499,9 +558,11 @@ mod tests {
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<bubble::GradientMaterial>::default());
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
         world.insert_resource(text::test_assets());
+        world.insert_resource(bubble::BubbleTheme::default());
         world.spawn((Player, Transform::default()));
         let mut camera = Camera::default();
         camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {

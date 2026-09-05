@@ -10,6 +10,7 @@ mod text;
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
+use bevy::sprite_render::Material2dPlugin;
 use bevy::window::WindowResolution;
 use bevy_common_assets::ron::RonAssetPlugin;
 
@@ -17,10 +18,19 @@ use crate::scene::Scene;
 use crate::systems::{
     actor, bubble, camera, debug_draw, input, player, scene as scene_loader, teleport, world,
 };
+use std::path::Path;
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
 /// display refresh rate or frame timing jitter.
 const FIXED_HZ: f64 = 60.0;
+
+/// Loads the global UI config into the theme resource bubbles style
+/// themselves from; runs before `bubble::setup` in the startup chain.
+fn load_ui_config(mut commands: Commands) {
+    commands.insert_resource(bubble::BubbleTheme::from_file(
+        &Path::new(editor::assets_root().as_os_str()).join("ui.ron"),
+    ));
+}
 
 /// Marks the player actor; movement and model-swap systems target this
 /// entity.
@@ -111,6 +121,7 @@ fn main() {
         }))
         .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
         .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
+        .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
         .add_plugins(editor::plugin)
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
@@ -120,6 +131,7 @@ fn main() {
                 screen::setup_screen,
                 camera::setup_game_camera,
                 text::setup,
+                load_ui_config,
                 bubble::setup,
                 world::spawn_world,
                 scene_loader::load_scene,
@@ -132,6 +144,8 @@ fn main() {
                 input::quit_on_escape,
                 screen::resize_present,
                 screen::validate_post_process_layout,
+                bubble::dismiss_on_confirm,
+                bubble::sync_theme,
                 scene_loader::apply_scene,
                 scene_loader::sync_ground,
                 scene_loader::apply_player_model,

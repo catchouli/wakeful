@@ -5,11 +5,22 @@
 //! Bubbles render on the UI layer (`screen.rs`), over the background and
 //! 3D content; the post-process camera then applies the same PSX-era
 //! dithering to them as the rest of the frame.
+//!
+//! Colors come from the shared [`BubbleTheme`] resource, loaded from
+//! `assets/ui.ron` — one place to restyle every bubble (see
+//! `sync_theme`).
 
+use std::path::Path;
+
+use bevy::asset::Asset;
 use bevy::camera::visibility::RenderLayers;
 use bevy::math::primitives::{Rectangle, Triangle2d};
 use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
+use bevy::sprite_render::Material2d;
 use bevy::text::TextLayoutInfo;
+use serde::Deserialize;
 
 use crate::screen::{GAME_HEIGHT, GAME_WIDTH, UI_LAYER};
 use crate::text::{self, TextAssets};
@@ -40,17 +51,166 @@ const CLOSE_SECS: f32 = 0.08;
 /// Small but nonzero, so the animation never produces a degenerate
 /// transform.
 const MIN_SCALE: f32 = 1e-3;
+/// Keys that dismiss wait-mode bubbles; the classic JRPG confirm pair.
+const CONFIRM_KEYS: [KeyCode; 2] = [KeyCode::KeyZ, KeyCode::Enter];
+
+/// The `assets/ui.ron` file: global UI tuning, loaded once at startup.
+/// Colors are `(r, g, b, a)` floats.
+#[derive(Deserialize)]
+pub(crate) struct UiConfig {
+    bubble: BubbleThemeFile,
+}
+
+#[derive(Deserialize)]
+struct BubbleThemeFile {
+    top_left: [f32; 4],
+    top_right: [f32; 4],
+    bottom_right: [f32; 4],
+    bottom_left: [f32; 4],
+    text: [f32; 4],
+}
+
+/// Every bubble's colors: a four-corner gradient for the fill plus the
+/// text color. Defaults to the classic white box with black text.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BubbleTheme {
+    pub(crate) top_left: Color,
+    pub(crate) top_right: Color,
+    pub(crate) bottom_right: Color,
+    pub(crate) bottom_left: Color,
+    pub(crate) text: Color,
+}
+
+impl Default for BubbleTheme {
+    fn default() -> Self {
+        Self::from_file_data([1.0; 4], [1.0; 4], [1.0; 4], [1.0; 4], [0.0, 0.0, 0.0, 1.0])
+    }
+}
+
+impl BubbleTheme {
+    fn from_file_data(
+        top_left: [f32; 4],
+        top_right: [f32; 4],
+        bottom_right: [f32; 4],
+        bottom_left: [f32; 4],
+        text: [f32; 4],
+    ) -> Self {
+        Self {
+            top_left: srgba(top_left),
+            top_right: srgba(top_right),
+            bottom_right: srgba(bottom_right),
+            bottom_left: srgba(bottom_left),
+            text: srgba(text),
+        }
+    }
+
+    /// Loads `path`, falling back to the default theme when the file is
+    /// missing and warning when it exists but is broken.
+    pub(crate) fn from_file(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        match ron::from_str::<UiConfig>(&text) {
+            Ok(config) => config.bubble.into(),
+            Err(e) => {
+                warn!(
+                    "{} is not a valid UI config, bubbles use the default theme: {e}",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+}
+
+impl From<BubbleThemeFile> for BubbleTheme {
+    fn from(file: BubbleThemeFile) -> Self {
+        Self::from_file_data(
+            file.top_left,
+            file.top_right,
+            file.bottom_right,
+            file.bottom_left,
+            file.text,
+        )
+    }
+}
+
+fn srgba(data: [f32; 4]) -> Color {
+    Color::srgba(data[0], data[1], data[2], data[3])
+}
+
+/// The bubble fill: a bilinear gradient between the four theme corners.
+#[derive(Asset, AsBindGroup, Clone, TypePath, Default)]
+pub(crate) struct GradientMaterial {
+    #[uniform(0)]
+    top_left: LinearRgba,
+    #[uniform(1)]
+    top_right: LinearRgba,
+    #[uniform(2)]
+    bottom_right: LinearRgba,
+    #[uniform(3)]
+    bottom_left: LinearRgba,
+}
+
+impl Material2d for GradientMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/bubble_gradient.wgsl".into()
+    }
+}
+
+impl GradientMaterial {
+    fn from_theme(theme: &BubbleTheme) -> Self {
+        let mut material = Self::default();
+        material.set_corners(theme);
+        material
+    }
+
+    fn set_corners(&mut self, theme: &BubbleTheme) {
+        self.top_left = theme.top_left.into();
+        self.top_right = theme.top_right.into();
+        self.bottom_right = theme.bottom_right.into();
+        self.bottom_left = theme.bottom_left.into();
+    }
+}
+
+/// The tail fill blends with the box, so it takes the average of the
+/// four corners, averaged in sRGB to match what the eye expects.
+fn tail_color(theme: &BubbleTheme) -> Color {
+    let mut sum = [0.0; 4];
+    for color in [
+        theme.top_left,
+        theme.top_right,
+        theme.bottom_right,
+        theme.bottom_left,
+    ] {
+        let [r, g, b, a] = Srgba::from(color).to_f32_array();
+        sum = [sum[0] + r, sum[1] + g, sum[2] + b, sum[3] + a];
+    }
+    Color::srgba(sum[0] / 4.0, sum[1] / 4.0, sum[2] / 4.0, sum[3] / 4.0)
+}
 
 /// Everything needed to draw one bubble's shapes; shared handles, built
-/// once by `setup`.
-#[derive(Resource)]
+/// once by `setup` from the theme.
+#[derive(Resource, Clone)]
 pub(crate) struct BubbleAssets {
     rect: Handle<Mesh>,
     tail: Handle<Mesh>,
     tail_inset: Handle<Mesh>,
-    black: Handle<ColorMaterial>,
-    white: Handle<ColorMaterial>,
+    /// Solid border + tail-border color.
+    border: Handle<ColorMaterial>,
+    /// Tail fill: the theme's corner average, so it blends into the box.
+    tail_fill: Handle<ColorMaterial>,
+    /// Shared fill gradient; restyled in place on theme changes.
+    fill: Handle<GradientMaterial>,
+    /// The theme these handles currently reflect; `sync_theme` compares
+    /// against it to catch theme changes without relying on change
+    /// detection, which bare-world tests can't exercise.
+    applied: BubbleTheme,
 }
+
+/// Marks a bubble's text child so theme changes can recolor it.
+#[derive(Component)]
+pub(crate) struct BubbleText;
 
 /// A bubble's state machine; scale is animated on the root transform so
 /// box, tail, and text grow from the bubble's center together.
@@ -60,6 +220,10 @@ pub(crate) struct SpeechBubble {
     /// Fitted = box and tail sized from measured text.
     fitted: bool,
     tail: Option<Vec2>,
+    /// Free-placed: the box is clamped on-screen when fitted.
+    free: bool,
+    /// Stay open until the confirm key, not a timer.
+    wait: bool,
     /// Seconds left once fully open; `None` stays open until dismissed.
     ttl: Option<f32>,
     parts: BubbleParts,
@@ -72,11 +236,15 @@ enum BubbleState {
 }
 
 impl SpeechBubble {
-    /// True once the open animation has finished. Test-only so far;
-    /// drop the gate when a game system needs it.
-    #[cfg(test)]
+    /// True once the open animation has finished; wait-mode dismissal
+    /// and the script-facing `waiting()` flag both gate on it.
     pub(crate) fn is_open(&self) -> bool {
         matches!(self.state, BubbleState::Open)
+    }
+
+    /// Whether this bubble holds the script until the player confirms.
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.wait
     }
 }
 
@@ -97,8 +265,14 @@ pub(crate) struct BubbleParams {
     pub text: String,
     pub at: Vec2,
     pub tail: Option<Vec2>,
+    /// Free-placed: the box is clamped to stay on-screen once fitted.
+    /// Actor-anchored bubbles are never clamped.
+    pub free: bool,
     /// Auto-dismiss once the bubble has been open this long.
     pub ttl: Option<f32>,
+    /// Stay open until the player presses confirm; `ttl` still applies
+    /// if set, so both can time a bubble out and let the player skip it.
+    pub wait: bool,
 }
 
 /// Builds the shared shape/material handles bubbles draw with.
@@ -106,16 +280,20 @@ pub(crate) fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut fills: ResMut<Assets<GradientMaterial>>,
+    theme: Res<BubbleTheme>,
 ) {
     let (rect, tail, tail_inset) = add_meshes(&mut meshes);
-    let (black, white) = add_materials(&mut materials);
+    let (border, tail_fill, fill) = add_materials(&mut materials, &mut fills, &theme);
 
     commands.insert_resource(BubbleAssets {
         rect,
         tail,
         tail_inset,
-        black,
-        white,
+        border,
+        tail_fill,
+        fill,
+        applied: *theme,
     });
 }
 
@@ -131,10 +309,17 @@ pub(crate) fn add_meshes(meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, Handle<Mes
 
 fn add_materials(
     materials: &mut Assets<ColorMaterial>,
-) -> (Handle<ColorMaterial>, Handle<ColorMaterial>) {
+    fills: &mut Assets<GradientMaterial>,
+    theme: &BubbleTheme,
+) -> (
+    Handle<ColorMaterial>,
+    Handle<ColorMaterial>,
+    Handle<GradientMaterial>,
+) {
     (
         materials.add(ColorMaterial::from_color(Color::BLACK)),
-        materials.add(ColorMaterial::from_color(Color::WHITE)),
+        materials.add(ColorMaterial::from_color(tail_color(theme))),
+        fills.add(GradientMaterial::from_theme(theme)),
     )
 }
 
@@ -142,22 +327,37 @@ fn add_materials(
 /// bubbles through the real path.
 #[cfg(test)]
 pub(crate) fn test_assets(world: &mut World) -> BubbleAssets {
+    test_assets_with_theme(world, BubbleTheme::default())
+}
+
+/// [`test_assets`] with an explicit theme, for tests that assert on
+/// themed colors.
+#[cfg(test)]
+pub(crate) fn test_assets_with_theme(world: &mut World, theme: BubbleTheme) -> BubbleAssets {
     // Sequential borrows: a bare world hands out one resource at a
     // time, unlike a system's disjoint `ResMut`s.
     let (rect, tail, tail_inset) = {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         add_meshes(&mut meshes)
     };
-    let (black, white) = {
+    let (border, tail_fill) = {
         let mut materials = world.resource_mut::<Assets<ColorMaterial>>();
-        add_materials(&mut materials)
+        let border = materials.add(ColorMaterial::from_color(Color::BLACK));
+        let tail_fill = materials.add(ColorMaterial::from_color(tail_color(&theme)));
+        (border, tail_fill)
+    };
+    let fill = {
+        let mut fills = world.resource_mut::<Assets<GradientMaterial>>();
+        fills.add(GradientMaterial::from_theme(&theme))
     };
     BubbleAssets {
         rect,
         tail,
         tail_inset,
-        black,
-        white,
+        border,
+        tail_fill,
+        fill,
+        applied: theme,
     }
 }
 
@@ -166,6 +366,7 @@ pub(crate) fn spawn_bubble(
     commands: &mut Commands,
     assets: &BubbleAssets,
     text_assets: &TextAssets,
+    theme: &BubbleTheme,
     params: BubbleParams,
 ) -> Entity {
     let tail = params
@@ -180,7 +381,8 @@ pub(crate) fn spawn_bubble(
         .spawn((
             text2d,
             text_font,
-            TextColor(Color::BLACK),
+            TextColor(theme.text),
+            BubbleText,
             Transform::from_xyz(0.0, 0.0, Z_TEXT),
             layers.clone(),
         ))
@@ -188,7 +390,7 @@ pub(crate) fn spawn_bubble(
     let back = commands
         .spawn((
             Mesh2d(assets.rect.clone()),
-            MeshMaterial2d(assets.black.clone()),
+            MeshMaterial2d(assets.border.clone()),
             Transform::from_xyz(0.0, 0.0, Z_BACK),
             layers.clone(),
         ))
@@ -196,7 +398,7 @@ pub(crate) fn spawn_bubble(
     let front = commands
         .spawn((
             Mesh2d(assets.rect.clone()),
-            MeshMaterial2d(assets.white.clone()),
+            MeshMaterial2d(assets.fill.clone()),
             Transform::from_xyz(0.0, 0.0, Z_FRONT),
             layers.clone(),
         ))
@@ -206,7 +408,7 @@ pub(crate) fn spawn_bubble(
             let black = commands
                 .spawn((
                     Mesh2d(assets.tail.clone()),
-                    MeshMaterial2d(assets.black.clone()),
+                    MeshMaterial2d(assets.border.clone()),
                     Transform::from_xyz(0.0, 0.0, Z_TAIL_BLACK),
                     layers.clone(),
                 ))
@@ -214,7 +416,7 @@ pub(crate) fn spawn_bubble(
             let white = commands
                 .spawn((
                     Mesh2d(assets.tail_inset.clone()),
-                    MeshMaterial2d(assets.white.clone()),
+                    MeshMaterial2d(assets.tail_fill.clone()),
                     Transform::from_xyz(0.0, 0.0, Z_TAIL_WHITE),
                     layers,
                 ))
@@ -233,6 +435,8 @@ pub(crate) fn spawn_bubble(
                 state: BubbleState::Opening { elapsed: 0.0 },
                 fitted: false,
                 tail,
+                free: params.free,
+                wait: params.wait,
                 ttl: params.ttl,
                 parts: BubbleParts {
                     back,
@@ -261,14 +465,60 @@ pub(crate) fn dismiss_bubble(bubble: &mut SpeechBubble) {
     }
 }
 
+/// Closes wait-mode bubbles when the player presses confirm. Only
+/// fully-open bubbles respond, so the keypress that opened one never
+/// dismisses it in the same breath.
+pub(crate) fn dismiss_on_confirm(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut bubbles: Query<&mut SpeechBubble>,
+) {
+    if !CONFIRM_KEYS.into_iter().any(|key| keys.just_pressed(key)) {
+        return;
+    }
+    for mut bubble in &mut bubbles {
+        if bubble.wait && bubble.is_open() {
+            dismiss_bubble(&mut bubble);
+        }
+    }
+}
+
+/// Restyles every bubble when the theme moves: the shared fill
+/// material and tail fill update in place, and open bubbles' text
+/// recolors. The editor UI edits the resource (and writes the config
+/// file) and this carries it to everything on screen.
+pub(crate) fn sync_theme(
+    theme: Res<BubbleTheme>,
+    assets: Option<ResMut<BubbleAssets>>,
+    mut fills: ResMut<Assets<GradientMaterial>>,
+    mut tail_fills: ResMut<Assets<ColorMaterial>>,
+    mut texts: Query<&mut TextColor, With<BubbleText>>,
+) {
+    let Some(mut assets) = assets else {
+        return;
+    };
+    if assets.applied == *theme {
+        return;
+    }
+    if let Some(mut fill) = fills.get_mut(&assets.fill) {
+        fill.set_corners(&theme);
+    }
+    if let Some(mut tail_fill) = tail_fills.get_mut(&assets.tail_fill) {
+        tail_fill.color = tail_color(&theme);
+    }
+    for mut color in &mut texts {
+        color.0 = theme.text;
+    }
+    assets.applied = *theme;
+}
+
 /// Sizes the box and places the tail once the text has been measured.
 /// Until then the bubble stays collapsed at its anchor point.
 pub(crate) fn fit_bubbles(
-    mut bubbles: Query<&mut SpeechBubble>,
+    mut bubbles: Query<(Entity, &mut SpeechBubble)>,
     texts: Query<&TextLayoutInfo>,
     mut transforms: Query<&mut Transform>,
 ) {
-    for mut bubble in &mut bubbles {
+    for (entity, mut bubble) in &mut bubbles {
         if bubble.fitted {
             continue;
         }
@@ -282,6 +532,12 @@ pub(crate) fn fit_bubbles(
         let half = size / 2.0;
         transforms.get_mut(bubble.parts.back).unwrap().scale = (size + 2.0 * BORDER).extend(Z_BACK);
         transforms.get_mut(bubble.parts.front).unwrap().scale = size.extend(Z_FRONT);
+
+        if bubble.free {
+            let mut root = transforms.get_mut(entity).unwrap();
+            root.translation =
+                clamp_to_screen(root.translation.xy(), half + Vec2::splat(BORDER)).extend(0.0);
+        }
 
         if let Some(dir) = bubble.tail {
             let edge = edge_distance(dir, half);
@@ -362,6 +618,15 @@ fn screen_to_world(at: Vec2) -> Vec2 {
     )
 }
 
+/// Keeps the center of a box with `half` extents (border included) so
+/// the box stays on the virtual screen. A bubble larger than the screen
+/// is left with a small wander range rather than snapping to center.
+fn clamp_to_screen(center: Vec2, half: Vec2) -> Vec2 {
+    let screen_half = Vec2::new(GAME_WIDTH as f32, GAME_HEIGHT as f32) / 2.0;
+    let reach = screen_half - half;
+    center.clamp(reach.min(-reach), reach.max(-reach))
+}
+
 /// Distance from the box center to its boundary along `dir`.
 fn edge_distance(dir: Vec2, half: Vec2) -> f32 {
     let dx = if dir.x != 0.0 {
@@ -407,16 +672,20 @@ mod tests {
     fn spawn_test_bubble(world: &mut World, tail: Option<Vec2>) -> Entity {
         let assets = bubble_assets(world);
         let text_assets = text::test_assets();
+        let theme = BubbleTheme::default();
         let mut commands = world.commands();
         let entity = spawn_bubble(
             &mut commands,
             &assets,
             &text_assets,
+            &theme,
             BubbleParams {
                 text: "hello".into(),
                 at: Vec2::new(160.0, 120.0),
                 tail,
+                free: false,
                 ttl: None,
+                wait: false,
             },
         );
         world.flush();
@@ -456,6 +725,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
         let entity = spawn_test_bubble(&mut world, None);
 
         let bubble = world.get::<SpeechBubble>(entity).unwrap();
@@ -475,6 +745,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
         let entity = spawn_test_bubble(&mut world, None);
 
         let parts = &world.get::<SpeechBubble>(entity).unwrap().parts;
@@ -488,6 +759,7 @@ mod tests {
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
         let entity = spawn_test_bubble(&mut world, None);
 
         // Halfway through opening, the scale is ease-out cubic at 0.5.
@@ -522,18 +794,23 @@ mod tests {
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
         let assets = bubble_assets(&mut world);
         let text_assets = text::test_assets();
+        let theme = BubbleTheme::default();
         let mut commands = world.commands();
         let entity = spawn_bubble(
             &mut commands,
             &assets,
             &text_assets,
+            &theme,
             BubbleParams {
                 text: "timed".into(),
                 at: Vec2::new(160.0, 120.0),
                 tail: None,
+                free: false,
                 ttl: Some(1.0),
+                wait: false,
             },
         );
         world.flush();
@@ -563,6 +840,7 @@ mod tests {
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
         let entity = spawn_test_bubble(&mut world, None);
 
         dismiss_bubble(world.get_mut::<SpeechBubble>(entity).unwrap().into_inner());
@@ -582,6 +860,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
         let entity = spawn_test_bubble(&mut world, Some(Vec2::NEG_Y));
         let text = world.get::<SpeechBubble>(entity).unwrap().parts.text;
         world.entity_mut(text).insert(TextLayoutInfo {
@@ -632,6 +911,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
         let entity = spawn_test_bubble(&mut world, None);
 
         world.run_system_once(fit_bubbles).unwrap();
@@ -643,5 +923,274 @@ mod tests {
             Vec3::ONE
         );
         assert!(!world.get::<SpeechBubble>(entity).unwrap().fitted);
+    }
+
+    fn themed_world() -> (World, BubbleTheme, BubbleAssets) {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
+        let theme = BubbleTheme::from_file_data(
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0, 1.0],
+            [0.5, 0.5, 0.5, 1.0],
+        );
+        let assets = test_assets_with_theme(&mut world, theme);
+        world.insert_resource(assets.clone());
+        (world, theme, assets)
+    }
+
+    #[test]
+    fn the_theme_styles_the_bubble() {
+        let (mut world, theme, assets) = themed_world();
+        let text_assets = text::test_assets();
+        let mut commands = world.commands();
+        let entity = spawn_bubble(
+            &mut commands,
+            &assets,
+            &text_assets,
+            &theme,
+            BubbleParams {
+                text: "styled".into(),
+                at: Vec2::new(160.0, 120.0),
+                tail: Some(Vec2::NEG_Y),
+                free: false,
+                ttl: None,
+                wait: false,
+            },
+        );
+        world.flush();
+
+        let bubble = world.get::<SpeechBubble>(entity).unwrap();
+        let text = world.get::<TextColor>(bubble.parts.text).unwrap();
+        assert_eq!(text.0, theme.text);
+        let materials = world.resource::<Assets<ColorMaterial>>();
+        let tail_fill = materials.get(&assets.tail_fill).unwrap();
+        assert_eq!(tail_fill.color, tail_color(&theme));
+        let fills = world.resource::<Assets<GradientMaterial>>();
+        let fill = fills.get(&assets.fill).unwrap();
+        assert_eq!(fill.top_left, LinearRgba::from(theme.top_left));
+        assert_eq!(fill.bottom_right, LinearRgba::from(theme.bottom_right));
+    }
+
+    #[test]
+    fn sync_theme_restyles_material_and_text() {
+        let (mut world, _, assets) = themed_world();
+        world.insert_resource(BubbleTheme::default());
+        let text_assets = text::test_assets();
+        let mut commands = world.commands();
+        let entity = spawn_bubble(
+            &mut commands,
+            &assets,
+            &text_assets,
+            &BubbleTheme::default(),
+            BubbleParams {
+                text: "restyled".into(),
+                at: Vec2::new(160.0, 120.0),
+                tail: None,
+                free: false,
+                ttl: None,
+                wait: false,
+            },
+        );
+        world.flush();
+        let replacement = BubbleTheme::from_file_data(
+            [0.1, 0.2, 0.3, 1.0],
+            [0.4, 0.5, 0.6, 1.0],
+            [0.7, 0.8, 0.9, 1.0],
+            [1.0, 0.9, 0.8, 1.0],
+            [0.2, 0.4, 0.6, 1.0],
+        );
+        world.insert_resource(replacement);
+
+        world.run_system_once(sync_theme).unwrap();
+
+        let fills = world.resource::<Assets<GradientMaterial>>();
+        let fill = fills.get(&assets.fill).unwrap();
+        assert_eq!(fill.top_left, LinearRgba::from(replacement.top_left));
+        let materials = world.resource::<Assets<ColorMaterial>>();
+        assert_eq!(
+            materials.get(&assets.tail_fill).unwrap().color,
+            tail_color(&replacement)
+        );
+        let text = world
+            .get::<TextColor>(world.get::<SpeechBubble>(entity).unwrap().parts.text)
+            .unwrap();
+        assert_eq!(text.0, replacement.text);
+    }
+
+    /// Spawns a wait-mode bubble in its initial opening state.
+    fn spawn_wait_bubble(world: &mut World, wait: bool) -> Entity {
+        let assets = bubble_assets(world);
+        let text_assets = text::test_assets();
+        let theme = BubbleTheme::default();
+        let mut commands = world.commands();
+        let entity = spawn_bubble(
+            &mut commands,
+            &assets,
+            &text_assets,
+            &theme,
+            BubbleParams {
+                text: "press z".into(),
+                at: Vec2::new(160.0, 120.0),
+                tail: None,
+                free: false,
+                ttl: None,
+                wait,
+            },
+        );
+        world.flush();
+        entity
+    }
+
+    /// Animates a bubble until fully open.
+    fn open_bubble(world: &mut World, entity: Entity) {
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(OPEN_SECS));
+        world.run_system_once(animate_bubbles).unwrap();
+        assert!(world.get::<SpeechBubble>(entity).unwrap().is_open());
+    }
+
+    fn press_confirm(world: &mut World) {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(CONFIRM_KEYS[0]);
+        world.insert_resource(keys);
+    }
+
+    #[test]
+    fn confirm_dismisses_open_wait_bubbles_only() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
+        let waiting = spawn_wait_bubble(&mut world, true);
+        let plain = spawn_wait_bubble(&mut world, false);
+        open_bubble(&mut world, waiting);
+        open_bubble(&mut world, plain);
+        press_confirm(&mut world);
+
+        world.run_system_once(dismiss_on_confirm).unwrap();
+
+        assert!(matches!(
+            world.get::<SpeechBubble>(waiting).unwrap().state,
+            BubbleState::Closing { .. }
+        ));
+        assert!(matches!(
+            world.get::<SpeechBubble>(plain).unwrap().state,
+            BubbleState::Open
+        ));
+    }
+
+    #[test]
+    fn opening_bubbles_ignore_confirm() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
+        let opened = spawn_wait_bubble(&mut world, true);
+        open_bubble(&mut world, opened);
+        // A second bubble still in its opening animation.
+        let fresh = spawn_wait_bubble(&mut world, true);
+        press_confirm(&mut world);
+
+        world.run_system_once(dismiss_on_confirm).unwrap();
+
+        assert!(matches!(
+            world.get::<SpeechBubble>(fresh).unwrap().state,
+            BubbleState::Opening { .. }
+        ));
+        assert!(matches!(
+            world.get::<SpeechBubble>(opened).unwrap().state,
+            BubbleState::Closing { .. }
+        ));
+    }
+
+    #[test]
+    fn free_bubbles_clamp_onscreen_when_fitted() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<ColorMaterial>::default());
+        world.insert_resource(Assets::<GradientMaterial>::default());
+        let assets = bubble_assets(&mut world);
+        let text_assets = text::test_assets();
+        let theme = BubbleTheme::default();
+        let mut commands = world.commands();
+        let free = spawn_bubble(
+            &mut commands,
+            &assets,
+            &text_assets,
+            &theme,
+            BubbleParams {
+                text: "free".into(),
+                // Near the top-left corner of the virtual screen.
+                at: Vec2::new(5.0, 5.0),
+                tail: None,
+                free: true,
+                ttl: None,
+                wait: false,
+            },
+        );
+        let anchored = spawn_bubble(
+            &mut commands,
+            &assets,
+            &text_assets,
+            &theme,
+            BubbleParams {
+                text: "anchored".into(),
+                at: Vec2::new(5.0, 5.0),
+                tail: None,
+                free: false,
+                ttl: None,
+                wait: false,
+            },
+        );
+        world.flush();
+        // Oversized text: the fitted box cannot fully fit at (5, 5).
+        let layout = TextLayoutInfo {
+            size: Vec2::new(300.0, 200.0),
+            ..default()
+        };
+        for bubble in [free, anchored] {
+            let text = world.get::<SpeechBubble>(bubble).unwrap().parts.text;
+            world.entity_mut(text).insert(layout.clone());
+        }
+
+        world.run_system_once(fit_bubbles).unwrap();
+
+        let half = (Vec2::new(300.0, 200.0) + 2.0 * PADDING) / 2.0 + Vec2::splat(BORDER);
+        let reach = Vec2::new(GAME_WIDTH as f32, GAME_HEIGHT as f32) / 2.0 - half;
+        let free_at = world.get::<Transform>(free).unwrap().translation;
+        assert!(free_at.x >= -reach.x - 1e-4 && free_at.y <= reach.y + 1e-4);
+        // Actor-anchored bubbles keep their exact placement.
+        let anchored_at = world.get::<Transform>(anchored).unwrap().translation;
+        assert_eq!(
+            anchored_at,
+            screen_to_world(Vec2::new(5.0, 5.0)).extend(0.0)
+        );
+    }
+
+    #[test]
+    fn tail_color_blends_the_corners() {
+        let theme = BubbleTheme::from_file_data(
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        assert_eq!(tail_color(&theme), Color::srgba(0.5, 0.5, 0.25, 1.0));
+    }
+
+    #[test]
+    fn a_missing_theme_file_falls_back_to_the_default() {
+        assert_eq!(
+            BubbleTheme::from_file(Path::new("no/such/ui.ron")),
+            BubbleTheme::default()
+        );
     }
 }

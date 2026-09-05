@@ -22,6 +22,7 @@ use bevy::prelude::*;
 use bevy::render::error_handler::{RenderErrorHandler, RenderErrorPolicy};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
+use bevy::sprite_render::Material2dPlugin;
 use bevy::window::{ExitCondition, WindowPlugin};
 
 // Shares the dither material with the main game binary.
@@ -93,6 +94,9 @@ fn main() {
         .insert_resource(RenderErrorHandler(|_, _, _| RenderErrorPolicy::Ignore))
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(16)))
         .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
+        .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
+        // The snapshot renders the default look; no ui.ron involved.
+        .insert_resource(bubble::BubbleTheme::default())
         .add_observer(on_captured(output))
         .add_systems(
             Startup,
@@ -174,16 +178,20 @@ fn spawn_bubble(
     mut commands: Commands,
     assets: Res<bubble::BubbleAssets>,
     text_assets: Res<text::TextAssets>,
+    theme: Res<bubble::BubbleTheme>,
 ) {
     bubble::spawn_bubble(
         &mut commands,
         &assets,
         &text_assets,
+        &theme,
         bubble::BubbleParams {
             text: "Over here!".into(),
             at: Vec2::new(screen::GAME_WIDTH as f32 / 2.0, 70.0),
             tail: Some(Vec2::NEG_Y),
+            free: false,
             ttl: None,
+            wait: false,
         },
     );
 }
