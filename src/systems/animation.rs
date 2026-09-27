@@ -17,6 +17,8 @@ use bevy::gltf::Gltf;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
+use crate::systems::actor::ScriptTicked;
+
 /// The standard clip names, in the order the graph is built. Locomotion
 /// clips loop; emotes are one-shots.
 const CLIPS: [&str; 6] = ["idle", "walk", "run", "pick_up", "shrug", "wave"];
@@ -44,12 +46,17 @@ pub(crate) struct CharacterAnimations {
 }
 
 /// Per-character driver state: the AnimationPlayer inside the model
-/// plus the one-shot emote currently selected.
+/// plus the one-shot emote and held pose currently selected. `root` is
+/// the spawned model's top entity, kept hidden until the character's
+/// first driven step so a re-entered scene never flashes its bind pose
+/// (`appeared` latches the unhide).
 #[derive(Component, Default)]
 pub(crate) struct CharacterAnimator {
     player: Option<Entity>,
     emote: Option<AnimationNodeIndex>,
     pose: Option<AnimationNodeIndex>,
+    root: Option<Entity>,
+    appeared: bool,
 }
 
 #[cfg(debug_assertions)]
@@ -198,7 +205,9 @@ pub(crate) fn resolve_pending_animations(
         let Some(gltf) = gltfs.get(&pending.0) else {
             continue;
         };
-        let Some(player) = find_animation_player(entity, &children, &anim_players) else {
+        let Some((player, model_root)) =
+            find_animation_player_with_root(entity, &children, &anim_players)
+        else {
             continue;
         };
         // Every named clip the model ships — standard names first so
@@ -230,14 +239,22 @@ pub(crate) fn resolve_pending_animations(
             .map(|(name, node)| (Box::<str>::from(*name), node))
             .collect();
         let graph = graphs.add(graph);
+        // The model spawns hidden and is revealed by the driver's
+        // first driven step (or the actor's first script tick), so a
+        // returning chest is seen open rather than flashing closed.
         commands.entity(entity).insert((
             CharacterAnimations { clips },
             CharacterAnimator {
                 player: Some(player),
                 emote: None,
                 pose: None,
+                root: model_root,
+                appeared: false,
             },
         ));
+        if let Some(root) = model_root {
+            commands.entity(root).insert(Visibility::Hidden);
+        }
         commands
             .entity(player)
             .insert((AnimationGraphHandle(graph), AnimationTransitions::new()));
@@ -245,19 +262,22 @@ pub(crate) fn resolve_pending_animations(
     }
 }
 
-fn find_animation_player(
+/// Finds the animation player inside a spawned model and the model's
+/// top entity (the direct child the scene was attached under).
+fn find_animation_player_with_root(
     entity: Entity,
     children: &Query<&Children>,
     players: &Query<Entity, With<AnimationPlayer>>,
-) -> Option<Entity> {
+) -> Option<(Entity, Option<Entity>)> {
     if players.contains(entity) {
-        return Some(entity);
+        return Some((entity, None));
     }
-    children
-        .get(entity)
-        .ok()?
-        .iter()
-        .find_map(|child| find_animation_player(child, children, players))
+    for child in children.get(entity).ok()?.iter() {
+        if let Some((player, _)) = find_animation_player_with_root(child, children, players) {
+            return Some((player, Some(child)));
+        }
+    }
+    None
 }
 
 /// Picks each character's clip from its locomotion and emote state and
@@ -265,16 +285,18 @@ fn find_animation_player(
 /// the engine can't know a model's clip names ahead of time.
 #[allow(clippy::type_complexity)]
 pub(crate) fn run_character_animations(
+    mut commands: Commands,
     mut characters: Query<(
         Entity,
         &Locomotion,
         Option<&mut EmoteRequest>,
         &CharacterAnimations,
         &mut CharacterAnimator,
+        Option<&ScriptTicked>,
     )>,
     mut transitions: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
 ) {
-    for (_entity, locomotion, request, anims, mut animator) in &mut characters {
+    for (_entity, locomotion, request, anims, mut animator, ticked) in &mut characters {
         let (emote_name, pose_name) = match request {
             Some(mut request) => {
                 let emote = request.emote.take();
@@ -344,6 +366,18 @@ pub(crate) fn run_character_animations(
                 }
             }
             Step::None => {}
+        }
+        // Reveal the model once it has something true to show: the
+        // first driven step applied a pose or gait, or the actor's
+        // script has ticked (a closed chest has nothing to animate but
+        // must be seen). Until then the model stays hidden so a
+        // re-entered scene never flashes its bind pose.
+        if !animator.appeared
+            && let Some(root) = animator.root
+            && (ticked.is_some() || !matches!(step, Step::None | Step::HoldEmote))
+        {
+            animator.appeared = true;
+            commands.entity(root).insert(Visibility::Visible);
         }
     }
 }
@@ -813,5 +847,75 @@ mod tests {
                 .unwrap()
                 .is_playing_animation(shrug)
         );
+    }
+
+    #[test]
+    fn a_fresh_model_hides_until_its_first_driven_step() {
+        // The closed-chest flash: a returning scene spawns the model in
+        // bind pose and the script's pose lands a tick later. The model
+        // stays hidden until something true is shown, so the chest is
+        // revealed already open.
+        let mut world = World::new();
+        world.init_resource::<Assets<Gltf>>();
+        world.init_resource::<Assets<AnimationGraph>>();
+        let (_, gltf) = gltf_with(&["open"]);
+        let mut gltfs = world.resource_mut::<Assets<Gltf>>();
+        let handle = gltfs.add(gltf);
+        let root = character_with_model(&mut world, handle);
+
+        world.run_system_once(resolve_pending_animations).unwrap();
+        world.flush();
+
+        let animator = world.get::<CharacterAnimator>(root).unwrap();
+        let model_root = animator.root.unwrap();
+        let player = animator.player.unwrap();
+        assert_eq!(
+            world.get::<Visibility>(model_root).copied(),
+            Some(Visibility::Hidden),
+            "a fresh model hides between spawn and its first driven step"
+        );
+
+        // First script tick: an open pose request lands. (Locomotion
+        // comes with every spawned character in the game; the driver's
+        // query reads it.)
+        let open = world.get::<CharacterAnimations>(root).unwrap().clips["open"];
+        world
+            .entity_mut(root)
+            .insert((ScriptTicked, Locomotion::default()));
+        world.entity_mut(root).insert(EmoteRequest {
+            emote: None,
+            pose: Some("open".into()),
+        });
+        world.run_system_once(run_character_animations).unwrap();
+
+        let animator = world.get::<CharacterAnimator>(root).unwrap();
+        assert!(animator.appeared, "the pose revealed the model");
+        assert_eq!(
+            world.get::<Visibility>(model_root).copied(),
+            Some(Visibility::Visible),
+        );
+        let animation = world
+            .get::<AnimationPlayer>(player)
+            .unwrap()
+            .animation(open);
+        assert!(animation.is_some_and(|a| a.is_paused()), "held at its end");
+    }
+
+    #[test]
+    fn a_model_without_clips_is_never_hidden() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Gltf>>();
+        world.init_resource::<Assets<AnimationGraph>>();
+        let (_, gltf) = gltf_with(&[]);
+        let mut gltfs = world.resource_mut::<Assets<Gltf>>();
+        let handle = gltfs.add(gltf);
+        let root = character_with_model(&mut world, handle);
+
+        world.run_system_once(resolve_pending_animations).unwrap();
+        world.flush();
+
+        // Nothing was wired and nothing was hidden.
+        assert!(world.get::<CharacterAnimations>(root).is_none());
+        assert!(world.get::<CharacterAnimator>(root).is_none());
     }
 }

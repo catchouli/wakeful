@@ -23,6 +23,12 @@ const SAY_TTL_SECS: f32 = 3.0;
 /// bubble's center, lifting the bubble above the model.
 const SAY_HEADROOM_PX: f32 = 24.0;
 
+/// Marks an actor whose script has run at least once. The animation
+/// driver keeps a freshly loaded model hidden until this lands (or a
+/// clip is applied), so a revisited scene never flashes the bind pose.
+#[derive(Component, Default)]
+pub(crate) struct ScriptTicked;
+
 /// Marks a scene actor. The optional script runtime is disabled once it
 /// errors, so a broken file can't spam warnings every tick.
 #[derive(Component)]
@@ -101,6 +107,9 @@ pub(crate) fn spawn_actors(
                 said: None,
             },
             Locomotion::default(),
+            // No script to tick: the driver's reveal marker would
+            // never land, so show script-less models from the start.
+            ScriptTicked,
             ActorModel(assets.load(gltf_asset_path(&actor.model))),
             // A pinned facing turns the model to a world yaw; otherwise
             // the actor looks the way the scene camera looks.
@@ -181,6 +190,8 @@ pub(crate) fn run_actor_scripts(
         let Some(runtime) = actor.script.as_mut() else {
             continue;
         };
+        // The model reveal waits for this (see ScriptTicked).
+        commands.entity(entity).insert(ScriptTicked);
         runtime.script.set_waiting(waiting);
         match runtime.script.update(
             &mut runtime.scope,
