@@ -17,7 +17,7 @@ fn on_update(x, z, player_x, player_z, dt) {
             emote("open");
             // Lower anchor than the goblin's: two wait-bubbles at one spot
             // would overlap into garble.
-            say("Found " + param("item") + "!", #{wait: true, at: [160.0, 100.0]});
+            say("Found " + param("item") + "!", #{wait: true, at: [160.0, 200.0]});
         }
         return ();
     }

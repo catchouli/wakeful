@@ -47,10 +47,13 @@ C = {}  # clip name -> (duration, frames)
 
 def open_amount(t):
     """Swing open over the first 70%, then hold (one-shot hold pose)."""
-    return eased([(0.7, 1.0), (1.0, 1.0)], t)
+    # Explicit origin: eased() treats the first step as the curve's
+    # start, so this reads "rise from closed to open over the first
+    # 70% of the clip, then hold".
+    return eased([(0.0, 0.0), (0.7, 1.0), (1.0, 1.0)], t)
 
 
-C["open"] = clip_oneshot(0.5, 30, lambda t: {
+C["open"] = clip_oneshot(1.0, 60, lambda t: {
     # Past vertical (110 would stand the lid up): flat-ish back and a
     # visible interior read as "open" from the field camera.
     "lid": {"r": (-160 * DEG * open_amount(t), 0, 0)},

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 /// Parses and structurally validates a generated model: in-bounds
 /// indexed meshes, LINEAR one-shot/loop clips targeting named nodes.
-fn assert_valid_model(name: &str, bytes: &[u8]) -> gltf::Document {
+fn assert_valid_model(name: &str, bytes: &[u8]) -> (gltf::Document, Vec<gltf::buffer::Data>) {
     // Parses the container, validates every accessor/bufferView against
     // the declared component types, and loads the buffers. Malformed
     // data — the class of bug a hand-rolled writer can ship — fails
@@ -65,7 +65,7 @@ fn assert_valid_model(name: &str, bytes: &[u8]) -> gltf::Document {
             );
         }
     }
-    document
+    (document, buffers)
 }
 
 const RIG_JOINTS: [&str; 8] = [
@@ -75,7 +75,7 @@ const CLIPS: [&str; 6] = ["idle", "walk", "run", "pick_up", "shrug", "wave"];
 
 #[test]
 fn the_generated_character_model_is_a_valid_rigged_gltf() {
-    let document = assert_valid_model(
+    let (document, buffers) = assert_valid_model(
         "character.glb",
         include_bytes!("../assets/models/character.glb"),
     );
@@ -97,13 +97,29 @@ fn the_generated_character_model_is_a_valid_rigged_gltf() {
         CLIPS.len(),
         "no extra unnamed animations"
     );
+
+    // One-shots must actually move their joints somewhere in the clip:
+    // an envelope baked constant parses perfectly and plays "instantly"
+    // — the chest lid bug. (One-shots may legitimately return to their
+    // first pose, so vary-across-keyframes is the guard, not first≠last.)
+    for clip in ["pick_up", "shrug", "wave"] {
+        let animation = document
+            .animations()
+            .find(|a| a.name() == Some(clip))
+            .expect("one-shot clip exists");
+        assert!(
+            clip_moves_a_joint(&document, &buffers, &animation),
+            "the '{clip}' one-shot must move its joints"
+        );
+    }
 }
 
 const CHEST_PARTS: [&str; 3] = ["character", "base", "lid"];
 
 #[test]
 fn the_generated_chest_model_opens_with_a_hinged_lid() {
-    let document = assert_valid_model("chest.glb", include_bytes!("../assets/models/chest.glb"));
+    let (document, buffers) =
+        assert_valid_model("chest.glb", include_bytes!("../assets/models/chest.glb"));
 
     let names: HashSet<&str> = document.nodes().filter_map(|n| n.name()).collect();
     for part in CHEST_PARTS {
@@ -119,4 +135,63 @@ fn the_generated_chest_model_opens_with_a_hinged_lid() {
         .map(|c| c.target().node().name().unwrap())
         .collect();
     assert!(targets.contains("lid"), "open must animate the lid");
+
+    // And the clip must actually move that lid: the first rotation
+    // keyframe is the closed rest pose, and later keyframes swing it
+    // open. A clip baked with a constant pose parses perfectly — and
+    // plays nothing.
+    let lid_channel = animations[0]
+        .channels()
+        .find(|c| c.target().node().name() == Some("lid"))
+        .expect("open rotates the lid");
+    let rotations =
+        channel_rotations(&document, &buffers, lid_channel).expect("lid rotation keyframes");
+    assert!(
+        quat_dot(rotations[0], [0.0, 0.0, 0.0, 1.0]) > 0.999,
+        "the lid must start closed"
+    );
+    // A constant clip is the bug: every keyframe the same pose, so the
+    // "swing" renders as a single frame.
+    assert!(
+        !rotations.iter().all(|r| quat_dot(*r, rotations[0]) > 0.999),
+        "the open clip must move the lid across the swing"
+    );
+}
+
+fn clip_moves_a_joint(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    animation: &gltf::Animation,
+) -> bool {
+    animation.channels().any(|channel| {
+        if channel.target().property() != gltf::animation::Property::Rotation {
+            return false;
+        }
+        let Some(rotations) = channel_rotations(document, buffers, channel) else {
+            return false;
+        };
+        // A constant rotation for every keyframe is the bug: the clip
+        // "plays" while the pose never changes.
+        !rotations.iter().all(|r| quat_dot(*r, rotations[0]) > 0.999)
+    })
+}
+
+/// Every rotation quaternion a channel bakes, for the
+/// constant-clip guard.
+fn channel_rotations(
+    _document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    channel: gltf::animation::Channel,
+) -> Option<Vec<[f32; 4]>> {
+    let reader = channel.reader(|buffer| buffers.get(buffer.index()).map(|data| &data[..]));
+    match reader.read_outputs()? {
+        gltf::animation::util::ReadOutputs::Rotations(rotations) => {
+            Some(rotations.into_f32().collect())
+        }
+        _ => None,
+    }
+}
+
+fn quat_dot(a: [f32; 4], b: [f32; 4]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>().abs()
 }
