@@ -753,14 +753,6 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
             }
         }
         Phase::Running => {
-            // The bags mirror into the store so handler scripts can
-            // battle_bag_get them (the store is what host fns read).
-            for participant in &state.participants {
-                for (key, value) in &participant.bag {
-                    let store_key = format!("bag:{}:{key}", participant.id);
-                    params.battle.set_store(&store_key, value.clone());
-                }
-            }
             sequence_turn(&params.battle, &mut params.camera, state);
         }
     }
@@ -885,6 +877,15 @@ pub(crate) fn stage_battle<'w, 's>(
         })
         .unwrap_or((Vec3::ZERO, Vec2::ZERO));
 
+    // Seed the store with the starting bags: handler scripts read and
+    // write bag values through it, and sequence_turn folds the store
+    // back into the participants before publishing.
+    for participant in &participants {
+        for (key, value) in &participant.bag {
+            let store_key = format!("bag:{}:{key}", participant.id);
+            handle.set_store(&store_key, value.clone());
+        }
+    }
     commands.insert_resource(Battle {
         phase: Phase::Freezing,
         arena,
