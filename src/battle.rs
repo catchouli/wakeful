@@ -801,6 +801,7 @@ pub(crate) fn stage_battle<'w, 's>(
     let arena = commands
         .spawn((
             ActorModel(assets.load(&def.arena)),
+            Visibility::default(),
             Transform::from_translation(Vec3::new(0.0, ARENA_HEIGHT / 2.0, 0.0)),
         ))
         .id();

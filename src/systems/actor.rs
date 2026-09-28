@@ -106,6 +106,7 @@ pub(crate) fn spawn_actors(
                 bubble: None,
                 said: None,
             },
+            Visibility::default(),
             Locomotion::default(),
             // No script to tick: the driver's reveal marker would
             // never land, so show script-less models from the start.
