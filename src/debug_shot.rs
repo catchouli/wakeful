@@ -59,13 +59,43 @@ fn scan_shot_requests(dir: &Path) -> Vec<String> {
 /// the GPU, delete the request. The PNG lands when the readback
 /// completes, a frame or two later.
 #[allow(clippy::too_many_arguments)]
-pub fn check_requests(
+/// The render-side queries of the state dump, bundled to stay under
+/// the system parameter limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct RenderDumpParams<'w, 's> {
+    cameras: Query<'w, 's, (&'static Transform, &'static Projection), With<Camera3d>>,
+    meshes: Query<
+        'w,
+        's,
+        (
+            &'static GlobalTransform,
+            &'static Mesh3d,
+            &'static Visibility,
+            &'static InheritedVisibility,
+        ),
+    >,
+    actormodels: Query<'w, 's, &'static crate::systems::actor::ActorModel>,
+    actors: Query<
+        'w,
+        's,
+        (
+            &'static GlobalTransform,
+            &'static Visibility,
+            &'static InheritedVisibility,
+        ),
+        With<crate::systems::actor::Actor>,
+    >,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn check_requests<'w, 's>(
     mut commands: Commands,
     dir: Option<Res<ShotDir>>,
     game_image: Option<Res<GameImage>>,
     state: Option<Res<crate::world_state::WorldState>>,
     battle_handle: Option<Res<crate::battle::BattleHandle>>,
     battle: Option<Res<crate::battle::Battle>>,
+    render: RenderDumpParams<'w, 's>,
     mut characters: Query<(
         Entity,
         &crate::systems::animation::CharacterAnimations,
@@ -77,9 +107,6 @@ pub fn check_requests(
     entities: &Entities,
     childrens: Query<&Children>,
     pending_animations: Query<(Entity, &crate::systems::animation::PendingAnimations)>,
-    cameras: Query<(&Transform, &Projection), With<Camera3d>>,
-    meshes: Query<(&GlobalTransform, &Mesh3d, &Visibility, &InheritedVisibility)>,
-    actormodels: Query<&crate::systems::actor::ActorModel>,
 ) {
     let (Some(dir), Some(game_image)) = (dir, game_image) else {
         return;
@@ -109,14 +136,15 @@ pub fn check_requests(
                     handle.pending_requests()
                 ));
             }
-            if let Ok((transform, Projection::Perspective(perspective))) = cameras.single() {
+            if let Ok((transform, Projection::Perspective(perspective))) = render.cameras.single() {
                 let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
                 lines.push(format!(
                     "camera: at {:?} yaw={:.2} pitch={:.2} fov={:.3}",
                     transform.translation, yaw, pitch, perspective.fov
                 ));
             }
-            let mut mesh_spots: Vec<String> = meshes
+            let mut mesh_spots: Vec<String> = render
+                .meshes
                 .iter()
                 .filter(|(t, _, _, _)| t.translation().y < 15.0)
                 .map(|(t, _, v, iv)| {
@@ -130,6 +158,14 @@ pub fn check_requests(
                 .collect();
             mesh_spots.sort();
             lines.push(format!("low_meshes: {}", mesh_spots.join(", ")));
+            for (transform, visibility, inherited) in &render.actors {
+                lines.push(format!(
+                    "actor: at {:?} v={} iv={}",
+                    transform.translation(),
+                    *visibility == Visibility::Visible,
+                    inherited.get()
+                ));
+            }
             if let Some(battle) = &battle {
                 lines.push(format!(
                     "arena: {:?} children={:?}",
@@ -145,7 +181,7 @@ pub fn check_requests(
                         .map(|c| (
                             c.id.as_str(),
                             c.entity.index(),
-                            actormodels.get(c.entity).is_ok(),
+                            render.actormodels.get(c.entity).is_ok(),
                             childrens.get(c.entity).ok().map(|ch| ch.len()),
                             childrens
                                 .get(c.entity)

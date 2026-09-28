@@ -4,7 +4,12 @@
 // only stages the fight and sequences turns.
 fn on_update(dt) {
     if in_battle() != true {
+        // The battle is over: the script-owned windows go with it.
         ui_close("battle-status");
+        ui_close("battle");
+        for n in [0, 1, 2, 3, 4, 5, 6, 7] {
+            ui_close("float" + n);
+        }
         return;
     }
 
@@ -26,17 +31,20 @@ fn on_update(dt) {
     let floats = battle_get("floats");
     if floats != () {
         let kept = [];
+        let i = 0;
         for f in floats {
             let age = f.age + dt;
             if age < 1.2 {
                 let at = battle_screen_pos(f.x, f.y, f.z);
                 if at.onscreen == true {
+                    f.n = i;
                     ui_window("float" + f.n, at.x - 12.0, at.y - 14.0 - age * 26.0, 34.0, 14.0);
                     ui_text("float" + f.n, f.text, 4.0, 3.0);
                 }
                 f.age = age;
                 kept.push(f);
             }
+            i = i + 1;
         }
         battle_set("floats", kept);
     }
