@@ -877,9 +877,12 @@ pub(crate) fn stage_battle<'w, 's>(
         })
         .unwrap_or((Vec3::ZERO, Vec2::ZERO));
 
-    // Seed the store with the starting bags: handler scripts read and
-    // write bag values through it, and sequence_turn folds the store
-    // back into the participants before publishing.
+    // The store starts clean, then is seeded with the starting bags:
+    // handler scripts read and write bag values through it, and
+    // sequence_turn folds the store back into the participants before
+    // publishing.
+    handle.set_active(true);
+    handle.clear_store();
     for participant in &participants {
         for (key, value) in &participant.bag {
             let store_key = format!("bag:{}:{key}", participant.id);
@@ -901,8 +904,6 @@ pub(crate) fn stage_battle<'w, 's>(
         player_entity,
         player_return,
     });
-    handle.set_active(true);
-    handle.clear_store();
 }
 
 /// `OnExit(Battle)`: the arena and the fighters go, the frozen frame
