@@ -132,6 +132,7 @@ pub fn apply_scene(
     input: Res<InputManager>,
     ui: Res<UiApi>,
     state: Res<WorldState>,
+    battle: Res<crate::battle::BattleHandle>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: GameCameraQuery,
@@ -209,7 +210,7 @@ pub fn apply_scene(
             .collect(),
     ));
 
-    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone());
+    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone(), battle.clone());
     let scene_path = current.path.as_str();
     actor::spawn_actors(
         &mut commands,
@@ -327,6 +328,41 @@ pub fn sync_ground(
     } else {
         Visibility::Visible
     };
+}
+
+/// `OnEnter(Battle)`: the scene steps aside — background, actors, and
+/// ground go dark while the arena has the screen, and the background
+/// camera stops compositing. Every root carries Visibility, so one
+/// hidden component folds each whole subtree away.
+/// The scene's battle-suspendable roots: the background photo, every
+/// scene actor, and the placeholder ground.
+type SceneSuspendBits = Or<(With<BackgroundSprite>, With<Actor>, With<Ground>)>;
+
+pub(crate) fn suspend_scene(
+    mut commands: Commands,
+    mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
+    scene_entities: Query<Entity, SceneSuspendBits>,
+) {
+    for entity in &scene_entities {
+        commands.entity(entity).insert(Visibility::Hidden);
+    }
+    for mut camera in &mut bg_cameras {
+        camera.is_active = false;
+    }
+}
+
+/// `OnExit(Battle)`: the scene comes back exactly as it was.
+pub(crate) fn resume_scene(
+    mut commands: Commands,
+    mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
+    scene_entities: Query<Entity, SceneSuspendBits>,
+) {
+    for entity in &scene_entities {
+        commands.entity(entity).insert(Visibility::Visible);
+    }
+    for mut camera in &mut bg_cameras {
+        camera.is_active = true;
+    }
 }
 
 #[cfg(test)]
@@ -499,6 +535,7 @@ mod tests {
         world.insert_resource(crate::systems::ui::UiApi::new());
         world.insert_resource(crate::systems::party::Party::default());
         world.insert_resource(crate::world_state::WorldState::default());
+        world.insert_resource(crate::battle::BattleHandle::new());
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);

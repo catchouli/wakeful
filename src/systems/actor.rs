@@ -49,7 +49,7 @@ struct ScriptRuntime {
 
 /// glTF model queued for the actor; removed once attached as a child.
 #[derive(Component)]
-pub(crate) struct ActorModel(Handle<Gltf>);
+pub(crate) struct ActorModel(pub(crate) Handle<Gltf>);
 
 /// Actors with runnable scripts and their transform; broken scripts are
 /// filtered out at the query level.
@@ -143,7 +143,11 @@ pub(crate) fn attach_actor_models(
         commands
             .entity(entity)
             .insert(PendingAnimations(model.0.clone()))
-            .with_child((WorldAssetRoot(scene), Transform::default()));
+            .with_child((
+                WorldAssetRoot(scene),
+                Visibility::default(),
+                Transform::default(),
+            ));
         commands.entity(entity).remove::<ActorModel>();
     }
 }

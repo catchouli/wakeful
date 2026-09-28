@@ -70,6 +70,16 @@ impl CharacterAnimator {
         )
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_root(&self) -> Option<Entity> {
+        self.root
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_appeared(&self) -> bool {
+        self.appeared
+    }
+
     pub(crate) fn debug_player(&self) -> Option<Entity> {
         self.player
     }
@@ -295,8 +305,9 @@ pub(crate) fn run_character_animations(
         Option<&ScriptTicked>,
     )>,
     mut transitions: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+    model_visibilities: Query<&'static Visibility>,
 ) {
-    for (_entity, locomotion, request, anims, mut animator, ticked) in &mut characters {
+    for (entity, locomotion, request, anims, mut animator, ticked) in &mut characters {
         let (emote_name, pose_name) = match request {
             Some(mut request) => {
                 let emote = request.emote.take();
@@ -317,9 +328,19 @@ pub(crate) fn run_character_animations(
         let emote_request = resolve(emote_name);
         let pose_request = resolve(pose_name);
         let Some(player_entity) = animator.player else {
+            if !animator.appeared {
+                warn!("driver {:?}: no player entity", entity.index());
+            }
             continue;
         };
         let Ok((mut player, mut transitions)) = transitions.get_mut(player_entity) else {
+            if !animator.appeared {
+                warn!(
+                    "driver {:?}: player {:?} missing player/transitions components",
+                    entity.index(),
+                    player_entity.index()
+                );
+            }
             continue;
         };
         let status = animator
@@ -367,17 +388,42 @@ pub(crate) fn run_character_animations(
             }
             Step::None => {}
         }
+        if !animator.appeared {
+            debug!(
+                "loop head {:?}: player={:?}",
+                entity.index(),
+                animator.player.map(|p| p.index())
+            );
+        }
+        if !animator.appeared {
+            warn!(
+                "reveal {:?}: step={:?} ticked={:?} moving={} running={}",
+                entity.index(),
+                step,
+                ticked.is_some(),
+                locomotion.moving,
+                locomotion.running
+            );
+        }
         // Reveal the model once it has something true to show: the
         // first driven step applied a pose or gait, or the actor's
         // script has ticked (a closed chest has nothing to animate but
         // must be seen). Until then the model stays hidden so a
-        // re-entered scene never flashes its bind pose.
-        if !animator.appeared
-            && let Some(root) = animator.root
-            && (ticked.is_some() || !matches!(step, Step::None | Step::HoldEmote))
-        {
-            animator.appeared = true;
-            commands.entity(root).insert(Visibility::Visible);
+        // re-entered scene never flashes its bind pose. The visible
+        // re-assert heals the race where the resolver's own hide lands
+        // after a reveal from an earlier tick.
+        if let Some(root) = animator.root {
+            let revealed = if animator.appeared {
+                model_visibilities.get(root) == Ok(&Visibility::Visible)
+            } else if ticked.is_some() || !matches!(step, Step::None | Step::HoldEmote) {
+                animator.appeared = true;
+                true
+            } else {
+                false
+            };
+            if revealed && model_visibilities.get(root) != Ok(&Visibility::Visible) {
+                commands.entity(root).insert(Visibility::Visible);
+            }
         }
     }
 }
@@ -786,6 +832,32 @@ mod tests {
     }
 
     #[test]
+    fn a_battle_participant_reveals_through_its_idle_gait() {
+        // Battle participants carry no actor scripts (no ScriptTicked
+        // ever lands): the idle gait alone must reveal them.
+        let mut world = World::new();
+        world.init_resource::<Assets<Gltf>>();
+        world.init_resource::<Assets<AnimationGraph>>();
+        let (_, gltf) = gltf_with(&["idle"]);
+        let handle = world.resource_mut::<Assets<Gltf>>().add(gltf);
+        let root = character_with_model(&mut world, handle);
+        world.entity_mut(root).insert(Locomotion::default());
+
+        world.run_system_once(resolve_pending_animations).unwrap();
+        world.flush();
+        world.run_system_once(run_character_animations).unwrap();
+        world.flush();
+
+        let animator = world.get::<CharacterAnimator>(root).unwrap();
+        let model_root = animator.root.unwrap();
+        assert_eq!(
+            world.get::<Visibility>(model_root).copied(),
+            Some(Visibility::Visible),
+            "the idle gait reveals a battle participant"
+        );
+    }
+
+    #[test]
     fn the_driver_plays_the_gait_and_starts_requested_emotes() {
         let mut world = World::new();
         world.init_resource::<Assets<Gltf>>();
@@ -919,3 +991,4 @@ mod tests {
         assert!(world.get::<CharacterAnimator>(root).is_none());
     }
 }
+// (appended below in the tests module)

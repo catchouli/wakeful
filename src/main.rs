@@ -1,9 +1,11 @@
 mod assets;
+mod battle;
 #[cfg(debug_assertions)]
 mod debug_shot;
 mod display;
 mod dither;
 mod editor;
+mod game_state;
 mod input;
 mod movement;
 mod scene;
@@ -43,7 +45,7 @@ fn load_ui_config(mut commands: Commands) {
 /// Marks the player actor; movement and model-swap systems target this
 /// entity.
 #[derive(Component)]
-struct Player;
+pub(crate) struct Player;
 
 /// Marks the fixed gameplay camera whose pose the scene controls.
 #[derive(Component)]
@@ -141,6 +143,9 @@ fn main() {
     .insert_resource(InputManager::load())
     .insert_resource(ui::UiApi::new())
     .insert_resource(world_state::WorldState::default())
+    .insert_resource(battle::BattleHandle::new())
+    .init_resource::<battle::PendingBattleStart>()
+    .init_state::<game_state::GameState>()
     .init_resource::<ui::UiPause>()
     .init_resource::<crate::input::InjectedInputs>()
     .insert_resource(party::Party::default())
@@ -154,6 +159,7 @@ fn main() {
             load_ui_config,
             bubble::setup,
             ui::setup,
+            battle::setup_fade,
             world::spawn_world,
             world_script::startup,
             scene_loader::load_scene,
@@ -184,23 +190,36 @@ fn main() {
     // cached applies the same frame the teleport lands.
     .add_systems(
         Update,
-        scene_loader::transition_scene.before(scene_loader::apply_scene),
+        (
+            battle::capture_frame.run_if(in_state(game_state::GameState::Battle)),
+            scene_loader::transition_scene.before(scene_loader::apply_scene),
+        ),
     )
     .add_systems(
         FixedUpdate,
         (
+            battle::battle_requests,
             crate::input::aggregate_inputs,
             ui::navigate,
-            player::move_player,
-            teleport::check_teleporters,
-            actor::run_actor_scripts,
+            player::move_player.run_if(in_state(game_state::GameState::Scene)),
+            teleport::check_teleporters.run_if(in_state(game_state::GameState::Scene)),
+            actor::run_actor_scripts.run_if(in_state(game_state::GameState::Scene)),
             animation::run_character_animations,
-            scene_loader::run_scene_scripts,
+            scene_loader::run_scene_scripts.run_if(in_state(game_state::GameState::Scene)),
             world_script::run_world_scripts,
+            battle::battle_turns.run_if(in_state(game_state::GameState::Battle)),
             ui::drain,
             ui::sync_cursor,
         )
             .chain(),
+    )
+    .add_systems(
+        OnEnter(game_state::GameState::Battle),
+        (battle::stage_battle, scene_loader::suspend_scene),
+    )
+    .add_systems(
+        OnExit(game_state::GameState::Battle),
+        (battle::cleanup_battle, scene_loader::resume_scene),
     );
 
     #[cfg(debug_assertions)]
