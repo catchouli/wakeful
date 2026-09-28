@@ -186,11 +186,13 @@ pub(crate) fn run_actor_scripts(
         // The script polls waiting() to hold its place while the player
         // hasn't confirmed its wait-mode bubble yet. Computed before the
         // script runtime borrows the actor mutably.
-        let waiting = actor.bubble.is_some_and(|bubble| {
-            bubbles
-                .get(bubble)
-                .is_ok_and(|bubble| bubble.is_waiting() && bubble.is_open())
-        });
+        // Script-facing waiting() = "my wait-mode bubble exists" — the
+        // opening animation counts, or an eager press during the pop
+        // would slip past the script's challenge gate. The is_open gate
+        // lives only in the engine's dismissal.
+        let waiting = actor
+            .bubble
+            .is_some_and(|bubble| bubbles.get(bubble).is_ok_and(|b| b.is_waiting()));
         let Some(runtime) = actor.script.as_mut() else {
             continue;
         };

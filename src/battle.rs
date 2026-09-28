@@ -753,6 +753,14 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
             }
         }
         Phase::Running => {
+            // The bags mirror into the store so handler scripts can
+            // battle_bag_get them (the store is what host fns read).
+            for participant in &state.participants {
+                for (key, value) in &participant.bag {
+                    let store_key = format!("bag:{}:{key}", participant.id);
+                    params.battle.set_store(&store_key, value.clone());
+                }
+            }
             sequence_turn(&params.battle, &mut params.camera, state);
         }
     }
@@ -996,6 +1004,11 @@ fn sequence_turn(
                 // next tick.
                 return;
             };
+            // A unit means the brain (usually the menu) is still
+            // deciding; anything non-string is a script bug.
+            if action_name.is_unit() {
+                return;
+            }
             let Ok(action_name) = action_name.into_string() else {
                 warn!("battle: brain for {id} returned a non-string action");
                 state.participants[index].time_until_act += 1.0;
