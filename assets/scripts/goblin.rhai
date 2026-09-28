@@ -22,10 +22,15 @@ fn on_update(x, z, player_x, player_z, dt) {
         let step = min(speed * dt, dist - 2.0);
         return [x + dx / dist * step, z + dz / dist * step];
     }
-    // Say it once per meeting; the wait bubble holds the rest.
+    // Say it once per meeting; the wait bubble holds the rest. The
+    // cross that dismisses the bubble must not also be the challenge,
+    // so the dismissal tick is swallowed and the next cross fights.
     if recall("said") == true {
-        // A cross press here is a challenge: one battle per meeting.
-        if recall("battled") != true && just_pressed("cross") {
+        let up = waiting();
+        let was_up = recall("up") == true;
+        remember("up", up);
+        let dismissal = was_up && !up;
+        if recall("battled") != true && just_pressed("cross") && !dismissal && !up {
             remember("battled", true);
             challenge();
         }

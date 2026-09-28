@@ -250,6 +250,9 @@ impl CompiledScript {
         // parser room (the limit exists to guard against stack
         // overflows, not to shape style).
         engine.set_max_expr_depths(512, 512);
+        // Script print() lands in the game log — diagnostics live in
+        // the same place as everything else.
+        engine.on_print(|message| bevy::log::info!("[script] {message}"));
         register(&mut engine, &source);
         let ast = engine.compile(text)?;
         *source.lock().unwrap_or_else(PoisonError::into_inner) =
