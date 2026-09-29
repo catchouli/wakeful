@@ -32,7 +32,7 @@ use crate::world_state::WorldState;
 use crate::systems::actor::ActorModel;
 use crate::systems::animation::EmoteRequest;
 use crate::systems::bubble::screen_to_world;
-use crate::systems::ui::UiApi;
+use crate::systems::ui::{UiApi, UiRequest};
 
 /// The generated arena's height (tools/generate_arena.py). The arena
 /// cube sits centered on its node, so staging lifts it by half: its
@@ -610,10 +610,10 @@ pub(crate) struct BattleTurnParams<'w, 's> {
     pub(crate) state: Option<ResMut<'w, Battle>>,
     pub(crate) next_state: ResMut<'w, NextState<GameState>>,
     pub(crate) camera:
-        Query<'w, 's, (&'static mut Transform, &'static mut Projection), With<Camera3d>>,
+        Query<'w, 's, (&'static mut Transform, &'static mut Projection), With<BattleCamera>>,
     pub(crate) fades: Query<'w, 's, &'static MeshMaterial2d<ColorMaterial>, With<BattleFade>>,
     pub(crate) frozen_quads:
-        Query<'w, 's, &'static mut Transform, (With<BattleFrozen>, Without<Camera3d>)>,
+        Query<'w, 's, &'static mut Transform, (With<BattleFrozen>, Without<BattleCamera>)>,
     pub(crate) materials: ResMut<'w, Assets<ColorMaterial>>,
 }
 
@@ -935,11 +935,25 @@ pub(crate) fn cleanup_battle(
     mut commands: Commands,
     battle: Option<Res<Battle>>,
     handle: ResMut<BattleHandle>,
+    ui: Res<UiApi>,
 ) {
     let Some(battle) = battle else {
         return;
     };
     commands.insert_resource(BattleExitFade { elapsed: 0.0 });
+    // A battle script that errored can't run its own exit cleanup, so
+    // the engine sweeps every battle window regardless.
+    ui.push(UiRequest::Close {
+        name: "battle".to_owned(),
+    });
+    ui.push(UiRequest::Close {
+        name: "battle-status".to_owned(),
+    });
+    for n in 0..8 {
+        ui.push(UiRequest::Close {
+            name: format!("float{n}"),
+        });
+    }
     for combatant in &battle.participants {
         if Some(combatant.entity) == battle.player_entity {
             if let Some((translation, rotation)) = battle.player_return {
@@ -964,7 +978,7 @@ pub(crate) fn cleanup_battle(
 /// ask their brain, dispatch the chosen action.
 fn sequence_turn(
     battle: &BattleHandle,
-    camera: &mut Query<(&mut Transform, &mut Projection), With<Camera3d>>,
+    camera: &mut Query<(&mut Transform, &mut Projection), With<BattleCamera>>,
     state: &mut Battle,
 ) {
     // Script-side bag mutations land in the store ("bag:<id>:<key>");
@@ -1177,7 +1191,7 @@ fn spawn_frozen_frame(
 }
 
 fn zoom_frozen_frame(
-    transforms: &mut Query<&'static mut Transform, (With<BattleFrozen>, Without<Camera3d>)>,
+    transforms: &mut Query<&'static mut Transform, (With<BattleFrozen>, Without<BattleCamera>)>,
     quad: Entity,
     scale: f32,
 ) {
