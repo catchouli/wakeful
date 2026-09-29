@@ -57,14 +57,21 @@ pub fn setup_game_camera(mut commands: Commands, game_image: Res<GameImage>) {
 /// so the activation can never drift from the state.
 pub fn sync_camera_activation(
     state: Res<State<GameState>>,
+    battle: Option<Res<crate::battle::Battle>>,
     mut scene: Query<&mut Camera, With<SceneCamera>>,
-    mut battle: Query<&mut Camera, (With<BattleCamera>, Without<SceneCamera>)>,
+    mut battle_cameras: Query<&mut Camera, (With<BattleCamera>, Without<SceneCamera>)>,
 ) {
-    let battle_active = *state.get() == GameState::Battle;
+    // The battle's own view only renders once its frozen-frame curtain
+    // is up (not during the capture), and hands back to the scene view
+    // at the exit fade's opaque peak.
+    let battle_active = *state.get() == GameState::Battle
+        && battle
+            .as_ref()
+            .is_some_and(|battle| battle.battle_view_active());
     for mut camera in &mut scene {
         camera.is_active = !battle_active;
     }
-    for mut camera in &mut battle {
+    for mut camera in &mut battle_cameras {
         camera.is_active = battle_active;
     }
 }

@@ -346,6 +346,19 @@ impl Battle {
             Phase::Returning { elapsed } => shape(elapsed),
         }
     }
+
+    /// Whether the battle's own 3D view should render right now: not
+    /// during the capture (the scene view persists under the frozen
+    /// frame, so the swap hides behind a picture of itself), and not
+    /// after the exit fade's opaque peak (the scene view comes back
+    /// under the fading black).
+    pub(crate) fn battle_view_active(&self) -> bool {
+        match &self.phase {
+            Phase::Freezing => false,
+            Phase::Swirl { .. } | Phase::Reveal { .. } | Phase::Running => true,
+            Phase::Returning { elapsed } => *elapsed >= TRANSITION_SECS / 2.0,
+        }
+    }
 }
 
 /// The persistent fade overlay quad. Its material alpha is the fade.
@@ -446,7 +459,6 @@ pub(crate) fn register_battle_api(
     {
         let battle = battle.clone();
         engine.register_fn("end_battle", move |result: &str| {
-            bevy::log::warn!("battle: end_battle('{result}') requested by a script");
             battle.push(BattleRequest::End {
                 result: result.to_owned(),
             });
