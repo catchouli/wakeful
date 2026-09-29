@@ -171,7 +171,6 @@ fn main() {
         (
             sys_input::quit_on_escape,
             camera::sync_camera_activation,
-            ui::ui_entity_probe,
             screen::resize_present,
             screen::validate_post_process_layout,
             display::sync_display_effects,

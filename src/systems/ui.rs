@@ -417,26 +417,6 @@ pub(crate) fn sync_cursor(
 /// window content, and carries the pause policy. Runs last in the
 /// fixed chain so windows appear the same tick they're declared.
 #[allow(clippy::too_many_arguments)]
-pub fn ui_entity_probe(
-    windows: Query<(Entity, &UiWindow)>,
-    quads: Query<(Entity, &Mesh2d, Option<&ChildOf>)>,
-    layers: Query<&RenderLayers>,
-) {
-    let count = windows.iter().count();
-    let quad_list: Vec<String> = quads
-        .iter()
-        .filter(|(entity, _, _)| {
-            layers
-                .get(*entity)
-                .is_ok_and(|l| l.iter().any(|layer| layer == crate::screen::UI_LAYER))
-        })
-        .map(|(entity, _, parent)| {
-            format!("{entity:?} parent={:?}", parent.map(|p| p.0))
-        })
-        .collect();
-    bevy::log::info!("ui probe: windows={count} quads={quad_list:?}");
-}
-
 pub(crate) fn drain(
     mut commands: Commands,
     api: Res<UiApi>,
@@ -463,7 +443,10 @@ pub(crate) fn drain(
     let mut warned = BTreeSet::new();
     bevy::log::info!(
         "ui drain: current windows {:?}",
-        windows.iter().map(|(_, w)| w.name.clone()).collect::<Vec<_>>()
+        windows
+            .iter()
+            .map(|(_, w)| w.name.clone())
+            .collect::<Vec<_>>()
     );
     for request in requests {
         match request {
@@ -512,9 +495,10 @@ pub(crate) fn drain(
     }
 
     for name in &closes {
-        bevy::log::info!("ui drain: closing window '{name}'");
-        let names: Vec<String> =
-            windows.iter().map(|(_, window)| window.name.clone()).collect();
+        let names: Vec<String> = windows
+            .iter()
+            .map(|(_, window)| window.name.clone())
+            .collect();
         bevy::log::info!("ui drain: live windows: {names:?}");
         if let Some((entity, _)) = windows.iter().find(|(_, window)| &window.name == name) {
             bevy::log::info!("ui drain: despawning window {entity:?} '{name}'");
