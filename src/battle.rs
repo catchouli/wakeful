@@ -446,6 +446,7 @@ pub(crate) fn register_battle_api(
     {
         let battle = battle.clone();
         engine.register_fn("end_battle", move |result: &str| {
+            bevy::log::warn!("battle: end_battle('{result}') requested by a script");
             battle.push(BattleRequest::End {
                 result: result.to_owned(),
             });
@@ -681,9 +682,17 @@ pub(crate) fn battle_requests(
     }
     if let Some(result) = end {
         if let Some(b) = battle_state.as_mut() {
+            bevy::log::warn!(
+                "battle: drain received end_battle('{result}'), phase={:?}",
+                b.phase
+            );
+            // The Returning phase owns the exit: fade, restore, then the
+            // state flip.
             b.result = Some(result);
+            b.phase = Phase::Returning { elapsed: 0.0 };
+        } else {
+            bevy::log::warn!("battle: end_battle with no battle running");
         }
-        next_state.set(GameState::Scene);
     }
 }
 

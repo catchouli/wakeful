@@ -495,16 +495,8 @@ pub(crate) fn drain(
     }
 
     for name in &closes {
-        let names: Vec<String> = windows
-            .iter()
-            .map(|(_, window)| window.name.clone())
-            .collect();
-        bevy::log::info!("ui drain: live windows: {names:?}");
         if let Some((entity, _)) = windows.iter().find(|(_, window)| &window.name == name) {
-            bevy::log::info!("ui drain: despawning window {entity:?} '{name}'");
             commands.entity(entity).despawn();
-        } else {
-            bevy::log::info!("ui drain: no window named '{name}' to close");
         }
         api.menus
             .lock()
