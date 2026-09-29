@@ -5,6 +5,7 @@
 fn on_update(dt) {
     if in_battle() != true {
         // The battle is over: the script-owned windows go with it.
+        print("battle over: closing windows");
         ui_close("battle-status");
         ui_close("battle");
         for n in [0, 1, 2, 3, 4, 5, 6, 7] {

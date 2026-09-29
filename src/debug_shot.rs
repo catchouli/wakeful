@@ -63,7 +63,8 @@ fn scan_shot_requests(dir: &Path) -> Vec<String> {
 /// the system parameter limit.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct RenderDumpParams<'w, 's> {
-    cameras: Query<'w, 's, (&'static Transform, &'static Projection), With<Camera3d>>,
+    cameras:
+        Query<'w, 's, (&'static Transform, &'static Projection, &'static Camera), With<Camera3d>>,
     meshes: Query<
         'w,
         's,
@@ -136,7 +137,12 @@ pub fn check_requests<'w, 's>(
                     handle.pending_requests()
                 ));
             }
-            if let Ok((transform, Projection::Perspective(perspective))) = render.cameras.single() {
+            let active = render
+                .cameras
+                .iter()
+                .find(|(_, _, camera)| camera.is_active)
+                .map(|(transform, projection, _)| (transform, projection));
+            if let Some((transform, Projection::Perspective(perspective))) = active {
                 let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
                 lines.push(format!(
                     "camera: at {:?} yaw={:.2} pitch={:.2} fov={:.3}",

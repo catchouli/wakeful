@@ -170,6 +170,8 @@ fn main() {
         Update,
         (
             sys_input::quit_on_escape,
+            camera::sync_camera_activation,
+            ui::ui_entity_probe,
             screen::resize_present,
             screen::validate_post_process_layout,
             display::sync_display_effects,
@@ -208,6 +210,7 @@ fn main() {
             scene_loader::run_scene_scripts.run_if(in_state(game_state::GameState::Scene)),
             world_script::run_world_scripts,
             battle::battle_turns.run_if(in_state(game_state::GameState::Battle)),
+            battle::battle_exit_fade.run_if(in_state(game_state::GameState::Scene)),
             ui::drain,
             ui::sync_cursor,
         )

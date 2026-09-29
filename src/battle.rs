@@ -26,6 +26,7 @@ use crate::Player;
 use crate::game_state::GameState;
 use crate::input::InputManager;
 use crate::systems::animation::Locomotion;
+use crate::systems::camera::BattleCamera;
 use crate::world_state::WorldState;
 
 use crate::systems::actor::ActorModel;
@@ -301,16 +302,11 @@ pub(crate) struct Battle {
     pub(crate) participants: Vec<Combatant>,
     /// Action handlers by name.
     pub(crate) actions: BTreeMap<String, ActionHandler>,
-    /// The camera pose before the battle, restored on return.
-    pub(crate) field_camera: (Vec3, Vec2),
-    pub(crate) battle_camera: (Vec3, Vec2),
     pub(crate) result: Option<String>,
     /// The frozen field frame quad, dropped once the battle reveals.
     pub(crate) frozen: Option<Entity>,
     /// The Freezing phase fires the capture exactly once.
     pub(crate) capture_requested: bool,
-    /// The Returning camera cut fires once, at the opaque peak.
-    pub(crate) cut_done: bool,
     /// How long the Freezing phase has waited for its capture.
     pub(crate) freezing_elapsed: f32,
     /// The field player's pose before the battle, restored on return.
@@ -604,7 +600,7 @@ pub(crate) fn camera_from_look(position: Vec3, look: Vec3) -> (Vec3, Vec2) {
 /// The field player, disjoint from the battle camera (both want
 /// `Transform`).
 type PlayerTransforms<'w, 's> =
-    Query<'w, 's, (Entity, &'static mut Transform), (With<Player>, Without<Camera3d>)>;
+    Query<'w, 's, (Entity, &'static mut Transform), (With<Player>, Without<BattleCamera>)>;
 
 #[derive(SystemParam)]
 pub(crate) struct BattleTurnParams<'w, 's> {
@@ -697,10 +693,9 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
         return;
     };
 
-    // The phase machine computes this tick's camera move without
-    // touching the rest of `params` (state borrows one of its fields).
+    // The phase machine. No camera moves: each state owns its camera
+    // and the activation sync swaps the views.
     let dt = time.delta().as_secs_f32();
-    let mut camera_move: Option<(Vec3, Vec2)> = None;
     let mut finished = false;
     match state.phase {
         Phase::Freezing => {
@@ -720,8 +715,6 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
                 zoom_frozen_frame(&mut params.frozen_quads, quad, 1.0 + 0.18 * ease(t));
             }
             if t >= 1.0 {
-                // The cut happens behind the opaque peak.
-                camera_move = Some(state.battle_camera);
                 state.phase = Phase::Reveal { elapsed: 0.0 };
             } else {
                 state.phase = Phase::Swirl { elapsed };
@@ -741,12 +734,9 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
         Phase::Returning { mut elapsed } => {
             elapsed += dt;
             let t = (elapsed / TRANSITION_SECS).min(1.0);
-            // The camera restores at the opaque peak, set once.
-            if t >= 0.5 && !state.cut_done {
-                camera_move = Some(state.field_camera);
-                state.cut_done = true;
-            }
             if t >= 1.0 {
+                // The scene camera takes over via the state flip; the
+                // exit fade is the scene-side system's job.
                 finished = true;
             } else {
                 state.phase = Phase::Returning { elapsed };
@@ -755,9 +745,6 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
         Phase::Running => {
             sequence_turn(&params.battle, &mut params.camera, state);
         }
-    }
-    if let Some(pose) = camera_move {
-        move_camera(&mut params.camera, &pose);
     }
     if finished {
         // The state machine owns the exit: dropping the flag lets the
@@ -787,7 +774,7 @@ pub(crate) fn stage_battle<'w, 's>(
     handle: ResMut<BattleHandle>,
     assets: Res<AssetServer>,
     mut players: PlayerTransforms<'w, 's>,
-    camera: Query<&Transform, With<Camera3d>>,
+    mut camera: Query<&'static mut Transform, With<BattleCamera>>,
     input: Res<InputManager>,
     ui: Res<UiApi>,
     world_state: Res<WorldState>,
@@ -868,15 +855,14 @@ pub(crate) fn stage_battle<'w, 's>(
                     .unwrap_or(Entity::PLACEHOLDER)
         })
         .map(|c| c.entity);
-    let battle_camera = camera_from_look(def.camera_pos, def.camera_look);
-    // The field camera pose is whatever the 3D camera currently wears.
-    let field_camera = camera
-        .single()
-        .map(|transform| {
-            let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-            (transform.translation, Vec2::new(yaw, pitch))
-        })
-        .unwrap_or((Vec3::ZERO, Vec2::ZERO));
+    // The battle camera takes the script's pose; the scene camera is
+    // never touched, so there is nothing to restore on the way out.
+    if let Ok(mut transform) = camera.single_mut() {
+        let (position, yaw_pitch) = camera_from_look(def.camera_pos, def.camera_look);
+        transform.translation = position;
+        let (yaw, pitch) = (yaw_pitch.x, yaw_pitch.y);
+        transform.rotation = Quat::from_euler(EulerRot::YXZ, pitch, yaw, 0.0);
+    }
 
     // The store starts clean, then is seeded with the starting bags:
     // handler scripts read and write bag values through it, and
@@ -895,16 +881,43 @@ pub(crate) fn stage_battle<'w, 's>(
         arena,
         participants,
         actions: std::mem::take(&mut pending.actions),
-        field_camera,
-        battle_camera,
         result: None,
         frozen: None,
         capture_requested: false,
-        cut_done: false,
         freezing_elapsed: 0.0,
         player_entity,
         player_return,
     });
+}
+
+/// The black fade-up over the scene after a battle exits: the battle
+/// ended at the opaque peak, and this hands the screen back gently.
+#[derive(Resource)]
+pub(crate) struct BattleExitFade {
+    elapsed: f32,
+}
+
+/// Scene-side: fades the post-battle black away over half a second.
+pub(crate) fn battle_exit_fade(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut fade: Option<ResMut<BattleExitFade>>,
+    fades: Query<&MeshMaterial2d<ColorMaterial>, With<BattleFade>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let Some(fade_state) = fade.as_mut() else {
+        return;
+    };
+    fade_state.elapsed += time.delta().as_secs_f32();
+    let alpha = (1.0 - fade_state.elapsed / 0.5).max(0.0);
+    for material_handle in &fades {
+        if let Some(mut material) = materials.get_mut(material_handle.id()) {
+            material.color.set_alpha(alpha);
+        }
+    }
+    if alpha <= 0.0 {
+        commands.remove_resource::<BattleExitFade>();
+    }
 }
 
 /// `OnExit(Battle)`: the arena and the fighters go, the frozen frame
@@ -917,6 +930,7 @@ pub(crate) fn cleanup_battle(
     let Some(battle) = battle else {
         return;
     };
+    commands.insert_resource(BattleExitFade { elapsed: 0.0 });
     for combatant in &battle.participants {
         if Some(combatant.entity) == battle.player_entity {
             if let Some((translation, rotation)) = battle.player_return {
@@ -1167,17 +1181,6 @@ fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn move_camera(
-    camera: &mut Query<(&mut Transform, &mut Projection), With<Camera3d>>,
-    (position, yaw_pitch): &(Vec3, Vec2),
-) {
-    let (yaw, pitch) = (yaw_pitch.x, yaw_pitch.y);
-    for (mut transform, _) in camera.iter_mut() {
-        transform.translation = *position;
-        transform.rotation = Quat::from_euler(EulerRot::YXZ, pitch, yaw, 0.0);
-    }
-}
-
 // ---------------------------------------------------------------- fade overlay
 
 /// Spawns the fullscreen fade quad once at startup; the battle engine
@@ -1230,12 +1233,9 @@ mod tests {
                 },
             ],
             actions: BTreeMap::new(),
-            field_camera: (Vec3::ZERO, Vec2::ZERO),
-            battle_camera: (Vec3::ZERO, Vec2::ZERO),
             result: None,
             frozen: None,
             capture_requested: false,
-            cut_done: false,
             freezing_elapsed: 0.0,
             player_entity: None,
             player_return: None,
@@ -1255,12 +1255,9 @@ mod tests {
             arena: Entity::PLACEHOLDER,
             participants: vec![],
             actions: BTreeMap::new(),
-            field_camera: (Vec3::ZERO, Vec2::ZERO),
-            battle_camera: (Vec3::ZERO, Vec2::ZERO),
             result: None,
             frozen: None,
             capture_requested: false,
-            cut_done: false,
             freezing_elapsed: 0.0,
             player_entity: None,
             player_return: None,
