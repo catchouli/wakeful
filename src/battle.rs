@@ -562,7 +562,6 @@ pub(crate) fn battle_requests(
     mut next_state: ResMut<NextState<GameState>>,
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
-    mut transition: ResMut<crate::transition::TransitionState>,
 ) {
     let mut end: Option<String> = None;
     for request in battle.take_requests() {
@@ -572,15 +571,10 @@ pub(crate) fn battle_requests(
                     warn!("start_battle ignored: a battle is already starting");
                 }
                 pending.def = Some(def);
-                // Into the transition state: the choreographer captures
-                // the scene while it is still fully on screen, raises
-                // the curtain, and flips to Battle at the covered point
-                // (where stage_battle stages behind the black).
-                transition.begin(
-                    crate::transition::TransitionKind::Battle,
-                    crate::transition::TransitionDirection::Entering,
-                );
-                next_state.set(GameState::Transition);
+                // STEP 1 (the direct-path test): the transition state is
+                // skipped — straight to the battle while the covered
+                // hooks are re-verified layer by layer.
+                next_state.set(GameState::Battle);
             }
             BattleRequest::End { result } => end = Some(result),
             BattleRequest::Action { name, handler } => {
@@ -615,13 +609,7 @@ pub(crate) fn battle_requests(
         } else {
             bevy::log::warn!("battle: end_battle with no battle running");
         }
-        // Back through the transition state: the cleanup fires at the
-        // covered point, then the black falls onto the scene.
-        transition.begin(
-            crate::transition::TransitionKind::Battle,
-            crate::transition::TransitionDirection::Returning,
-        );
-        next_state.set(GameState::Transition);
+        next_state.set(GameState::Scene);
     }
 }
 

@@ -173,18 +173,6 @@ fn main() {
         Update,
         (
             transition::capture.run_if(in_state(game_state::GameState::Transition)),
-            battle::stage_battle
-                .run_if(transition::at_covered)
-                .run_if(transition::entering),
-            scene_loader::suspend_scene
-                .run_if(transition::at_covered)
-                .run_if(transition::entering),
-            battle::cleanup_battle
-                .run_if(transition::at_covered)
-                .run_if(transition::returning),
-            scene_loader::resume_scene
-                .run_if(transition::at_covered)
-                .run_if(transition::returning),
             transition::drive_transition,
         )
             .chain(),
@@ -233,6 +221,14 @@ fn main() {
             ui::sync_cursor,
         )
             .chain(),
+    )
+    .add_systems(
+        OnEnter(game_state::GameState::Battle),
+        (battle::stage_battle, scene_loader::suspend_scene),
+    )
+    .add_systems(
+        OnExit(game_state::GameState::Battle),
+        (battle::cleanup_battle, scene_loader::resume_scene),
     );
 
     #[cfg(debug_assertions)]

@@ -35,6 +35,10 @@ use crate::screen::TRANSITION_ORDER;
 pub(crate) const COVER_SECS: f32 = 1.5;
 
 /// Which context the transition is carrying the game between.
+///
+/// Step 1 of the transition rebuild runs the direct Scene⇄Battle path
+/// with this machinery dormant; the choreography layers back on in
+/// step 2 once the core flow is proven.
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
 pub(crate) enum TransitionKind {
     #[default]
@@ -65,6 +69,7 @@ pub(crate) enum TransitionStage {
 /// Whether the transition is heading into a new context (the battle
 /// staging fires at the cover) or back to the scene (the cleanup does).
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
+#[allow(dead_code)]
 pub(crate) enum TransitionDirection {
     #[default]
     Entering,
@@ -74,6 +79,7 @@ pub(crate) enum TransitionDirection {
 /// The transition's current state, driven by consumers calling
 /// [`TransitionState::begin`] and animated by [`drive_transition`].
 #[derive(Resource, Default)]
+#[allow(dead_code)]
 pub(crate) struct TransitionState {
     pub(crate) kind: TransitionKind,
     pub(crate) stage: TransitionStage,
@@ -82,6 +88,7 @@ pub(crate) struct TransitionState {
     pub(crate) cover: f32,
 }
 
+#[allow(dead_code)]
 impl TransitionState {
     /// Starts a transition toward a context (`entering`) or back to the
     /// scene (`returning`).
@@ -298,7 +305,8 @@ pub(crate) fn drive_transition(
 
 /// The run condition for consumer hooks that fire at the covered point:
 /// the battle's staging (entering) and cleanup (returning), the scene's
-/// suspension and resume.
+/// suspension and resume. Dormant during the direct-path test.
+#[allow(dead_code)]
 pub(crate) fn at_covered(
     state: Res<State<crate::game_state::GameState>>,
     transition: Res<TransitionState>,
@@ -307,10 +315,12 @@ pub(crate) fn at_covered(
         && transition.stage == TransitionStage::Covered
 }
 
+#[allow(dead_code)]
 pub(crate) fn entering(transition: Res<TransitionState>) -> bool {
     transition.direction == TransitionDirection::Entering
 }
 
+#[allow(dead_code)]
 pub(crate) fn returning(transition: Res<TransitionState>) -> bool {
     transition.direction == TransitionDirection::Returning
 }
