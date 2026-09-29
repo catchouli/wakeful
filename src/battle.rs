@@ -40,8 +40,8 @@ use crate::systems::ui::{UiApi, UiRequest};
 const ARENA_HEIGHT: f32 = 10.0;
 
 /// How long the frozen-frame swirl and the fade home each take.
-const SWIRL_SECS: f32 = 0.6;
-const TRANSITION_SECS: f32 = 1.0;
+const SWIRL_SECS: f32 = 1.5;
+const TRANSITION_SECS: f32 = 4.0;
 /// A stalled field capture can't hold the battle hostage.
 const FREEZE_TIMEOUT_SECS: f32 = 2.0;
 
@@ -356,7 +356,7 @@ impl Battle {
         match &self.phase {
             Phase::Freezing => false,
             Phase::Swirl { .. } | Phase::Reveal { .. } | Phase::Running => true,
-            Phase::Returning { elapsed } => *elapsed >= TRANSITION_SECS / 2.0,
+            Phase::Returning { elapsed } => *elapsed < TRANSITION_SECS / 2.0,
         }
     }
 }
@@ -664,6 +664,16 @@ pub(crate) fn battle_requests(
                         spawn_frozen_frame(&mut commands, &mut materials, &bubble_assets, texture);
                     b.frozen = Some(quad);
                     b.phase = Phase::Swirl { elapsed: 0.0 };
+                    // The frozen curtain is up: the fighters take the
+                    // stage behind it.
+                    for combatant in &b.participants {
+                        commands
+                            .entity(combatant.entity)
+                            .insert(Visibility::Visible);
+                    }
+                    if let Some(player) = b.player_entity {
+                        commands.entity(player).insert(Visibility::Visible);
+                    }
                 }
             }
             BattleRequest::Action { name, handler } => {
@@ -755,9 +765,10 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
         Phase::Returning { mut elapsed } => {
             elapsed += dt;
             let t = (elapsed / TRANSITION_SECS).min(1.0);
-            if t >= 1.0 {
-                // The scene camera takes over via the state flip; the
-                // exit fade is the scene-side system's job.
+            if t >= 0.5 {
+                // The opaque peak: the scene returns behind the black
+                // (OnExit cleanup + resume), and battle_exit_fade fades
+                // the scene up on the other side.
                 finished = true;
             } else {
                 state.phase = Phase::Returning { elapsed };
@@ -838,6 +849,8 @@ pub(crate) fn stage_battle<'w, 's>(
             player_return = Some((transform.translation, transform.rotation));
             transform.translation = def.position;
             transform.rotation = rotation;
+            // Hidden until the frozen frame covers the view swap.
+            commands.entity(entity).insert(Visibility::Hidden);
             entity
         } else {
             let model = def.model.clone();
@@ -846,7 +859,9 @@ pub(crate) fn stage_battle<'w, 's>(
                     BattleParticipant,
                     Locomotion::default(),
                     ActorModel(assets.load(&model)),
-                    Visibility::default(),
+                    // Hidden until the frozen frame covers the view
+                    // swap: the fighters take the stage behind it.
+                    Visibility::Hidden,
                     Transform::from_translation(def.position).with_rotation(rotation),
                 ))
                 .id()
