@@ -14,7 +14,6 @@
 //! the post-process camera draws nothing and exists to carry fullscreen
 //! effects over the finished frame.
 
-use crate::display;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
@@ -129,7 +128,6 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         Msaa::Off,
         RenderLayers::layer(1),
         PresentSprite,
-        display::tuned_final_post(),
         Sprite {
             image: handle,
             ..default()
