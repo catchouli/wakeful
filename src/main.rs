@@ -172,10 +172,28 @@ fn main() {
     .add_systems(
         Update,
         (
+            transition::capture.run_if(in_state(game_state::GameState::Transition)),
+            battle::stage_battle
+                .run_if(transition::at_covered)
+                .run_if(transition::entering),
+            scene_loader::suspend_scene
+                .run_if(transition::at_covered)
+                .run_if(transition::entering),
+            battle::cleanup_battle
+                .run_if(transition::at_covered)
+                .run_if(transition::returning),
+            scene_loader::resume_scene
+                .run_if(transition::at_covered)
+                .run_if(transition::returning),
+            transition::drive_transition,
+        )
+            .chain(),
+    )
+    .add_systems(
+        Update,
+        (
             sys_input::quit_on_escape,
             camera::sync_camera_activation,
-            transition::capture.run_if(in_state(game_state::GameState::Transition)),
-            transition::drive_transition,
             screen::resize_present,
             screen::validate_post_process_layout,
             display::sync_display_effects,
@@ -215,20 +233,6 @@ fn main() {
             ui::sync_cursor,
         )
             .chain(),
-    )
-    .add_systems(
-        Update,
-        (battle::stage_battle, scene_loader::suspend_scene)
-            .run_if(in_state(game_state::GameState::Transition))
-            .run_if(transition::at_covered)
-            .run_if(transition::entering),
-    )
-    .add_systems(
-        Update,
-        (battle::cleanup_battle, scene_loader::resume_scene)
-            .run_if(in_state(game_state::GameState::Transition))
-            .run_if(transition::at_covered)
-            .run_if(transition::returning),
     );
 
     #[cfg(debug_assertions)]
