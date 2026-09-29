@@ -10,13 +10,8 @@
 //! same machinery drives menu-driven heroes (the shipped player brain)
 //! and AI enemies, so the engine never distinguishes sides.
 
-use bevy::asset::RenderAssetUsages;
-use bevy::camera::visibility::RenderLayers;
 use bevy::ecs::system::SystemParam;
-use bevy::image::Image;
 use bevy::prelude::*;
-use bevy::render::gpu_readback::{Readback, ReadbackComplete};
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::state::state::NextState;
 use rhai::{Dynamic, Engine, Scope};
 use std::collections::BTreeMap;
@@ -31,18 +26,12 @@ use crate::world_state::WorldState;
 
 use crate::systems::actor::ActorModel;
 use crate::systems::animation::EmoteRequest;
-use crate::systems::bubble::screen_to_world;
 use crate::systems::ui::{UiApi, UiRequest};
 
 /// The generated arena's height (tools/generate_arena.py). The arena
 /// cube sits centered on its node, so staging lifts it by half: its
 /// floor lands on the origin and the fight happens at field level.
 const ARENA_HEIGHT: f32 = 10.0;
-
-/// How long the frozen-frame swirl and the fade home each take.
-const SWIRL_SECS: f32 = 1.5;
-/// A stalled field capture can't hold the battle hostage.
-const FREEZE_TIMEOUT_SECS: f32 = 2.0;
 
 // ---------------------------------------------------------------- script state
 
@@ -110,10 +99,6 @@ pub(crate) enum BattleRequest {
     /// The result string is for the script's own use after return.
     End {
         result: String,
-    },
-    /// The field-frame capture completed: show it as the frozen quad.
-    Frozen {
-        texture: Handle<Image>,
     },
     Action {
         name: String,
@@ -271,18 +256,6 @@ pub(crate) fn project_to_screen(point: Vec3, camera: &CameraSnapshot) -> (Vec2, 
 
 // ---------------------------------------------------------------- engine state
 
-/// Phases: capture the field frame, swirl it away (zoom + fade — the
-/// camera cut happens behind the opaque peak), reveal the fight, then
-/// the mirror-image fade home. The field camera never visibly moves.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Phase {
-    Freezing,
-    Swirl { elapsed: f32 },
-    Reveal { elapsed: f32 },
-    Running,
-    Returning { elapsed: f32 },
-}
-
 /// One staged combatant on the engine side.
 pub(crate) struct Combatant {
     pub(crate) id: String,
@@ -294,16 +267,16 @@ pub(crate) struct Combatant {
 }
 
 /// The engine-side battle, present as a resource only while one runs.
+/// The transition choreography (the capture, the curtain, the cover)
+/// lives in transition.rs; by the time this resource exists the world
+/// is the fight.
 #[derive(Resource)]
 pub(crate) struct Battle {
-    pub(crate) phase: Phase,
     pub(crate) arena: Entity,
     pub(crate) participants: Vec<Combatant>,
     /// Action handlers by name.
     pub(crate) actions: BTreeMap<String, ActionHandler>,
     pub(crate) result: Option<String>,
-    /// How long the Freezing phase has waited for its capture.
-    pub(crate) freezing_elapsed: f32,
     /// The field player's pose before the battle, restored on return.
     pub(crate) player_return: Option<(Vec3, Quat)>,
     /// The player participant's entity (the field player itself).
@@ -319,29 +292,7 @@ impl Battle {
             .min_by(|a, b| a.1.time_until_act.total_cmp(&b.1.time_until_act))
             .map(|(i, _)| i)
     }
-
-    /// Whether the battle's own 3D view should render right now: not
-    /// during the capture (the scene view persists under the frozen
-    /// frame, so the swap hides behind a picture of itself), and not
-    /// after the exit fade's opaque peak (the scene view comes back
-    /// under the fading black).
-    pub(crate) fn battle_view_active(&self) -> bool {
-        match &self.phase {
-            Phase::Freezing => false,
-            Phase::Swirl { .. } | Phase::Reveal { .. } | Phase::Running => true,
-            Phase::Returning { elapsed } => *elapsed < SWIRL_SECS / 2.0,
-        }
-    }
 }
-
-/// The frozen-frame curtain's material: textureless (black) between
-/// battles, holding the captured scene picture during the swirl.
-#[derive(Resource)]
-pub(crate) struct FrozenMaterial(pub(crate) Handle<ColorMaterial>);
-
-/// The frozen field frame shown during the swirl.
-#[derive(Component)]
-pub(crate) struct BattleFrozen;
 
 /// Marks a battle participant entity (model root + brain + bag live in
 /// `Battle`).
@@ -594,12 +545,7 @@ type PlayerTransforms<'w, 's> =
 pub(crate) struct BattleTurnParams<'w, 's> {
     pub(crate) battle: ResMut<'w, BattleHandle>,
     pub(crate) state: Option<ResMut<'w, Battle>>,
-    pub(crate) next_state: ResMut<'w, NextState<GameState>>,
-    pub(crate) camera:
-        Query<'w, 's, (&'static mut Transform, &'static mut Projection), With<BattleCamera>>,
-    pub(crate) frozen_quads:
-        Query<'w, 's, &'static mut Visibility, (With<BattleFrozen>, Without<BattleCamera>)>,
-    pub(crate) transition: ResMut<'w, crate::transition::TransitionState>,
+    pub(crate) camera: Query<'w, 's, (&'static Transform, &'static Projection), With<BattleCamera>>,
 }
 
 /// Drains script requests, runs phases, and sequences turns. Sits at
@@ -611,19 +557,12 @@ pub(crate) struct BattleTurnParams<'w, 's> {
 /// End drive the state transition itself.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn battle_requests(
-    mut commands: Commands,
     battle: ResMut<BattleHandle>,
     mut battle_state: Option<ResMut<Battle>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    game_image: Option<Res<crate::screen::GameImage>>,
-    frozen_material: Res<FrozenMaterial>,
-    mut frozen_visibilities: Query<
-        &'static mut Visibility,
-        (With<BattleFrozen>, Without<BattleCamera>),
-    >,
+    mut transition: ResMut<crate::transition::TransitionState>,
 ) {
     let mut end: Option<String> = None;
     for request in battle.take_requests() {
@@ -633,71 +572,17 @@ pub(crate) fn battle_requests(
                     warn!("start_battle ignored: a battle is already starting");
                 }
                 pending.def = Some(def);
-                // Capture the scene *before* the state flip: while this
-                // runs the street is still fully on screen, and the
-                // readback completes over the next frames while OnEnter
-                // stages the battle behind the curtain.
-                if let Some(game_image) = game_image.as_ref() {
-                    commands
-                        .spawn(Readback::texture(game_image.0.clone()))
-                        .observe(
-                            move |trigger: On<ReadbackComplete>,
-                                  mut images: ResMut<Assets<Image>>,
-                                  mut commands: Commands,
-                                  handle: Res<BattleHandle>| {
-                                let expected = (crate::screen::GAME_WIDTH
-                                    * crate::screen::GAME_HEIGHT
-                                    * 4) as usize;
-                                if trigger.data.len() != expected {
-                                    warn!(
-                                        "battle: field capture came back {} bytes",
-                                        trigger.data.len()
-                                    );
-                                    return;
-                                }
-                                let image = Image::new(
-                                    Extent3d {
-                                        width: crate::screen::GAME_WIDTH,
-                                        height: crate::screen::GAME_HEIGHT,
-                                        depth_or_array_layers: 1,
-                                    },
-                                    TextureDimension::D2,
-                                    trigger.data.clone(),
-                                    TextureFormat::Rgba8UnormSrgb,
-                                    RenderAssetUsages::MAIN_WORLD,
-                                );
-                                let texture = images.add(image);
-                                handle.push(BattleRequest::Frozen { texture });
-                                commands.entity(trigger.entity).remove::<Readback>();
-                            },
-                        );
-                }
-                next_state.set(GameState::Battle);
+                // Into the transition state: the choreographer captures
+                // the scene while it is still fully on screen, raises
+                // the curtain, and flips to Battle at the covered point
+                // (where stage_battle stages behind the black).
+                transition.begin(
+                    crate::transition::TransitionKind::Battle,
+                    crate::transition::TransitionDirection::Entering,
+                );
+                next_state.set(GameState::Transition);
             }
             BattleRequest::End { result } => end = Some(result),
-            BattleRequest::Frozen { texture } => {
-                if let Some(b) = battle_state.as_mut() {
-                    // The boot-spawned curtain takes the captured
-                    // picture and covers the screen at full opacity.
-                    if let Some(mut material) = materials.get_mut(&frozen_material.0) {
-                        material.texture = Some(texture);
-                    }
-                    for mut visibility in &mut frozen_visibilities {
-                        *visibility = Visibility::Visible;
-                    }
-                    // The curtain is up: the fighters take the stage
-                    // behind it.
-                    for combatant in &b.participants {
-                        commands
-                            .entity(combatant.entity)
-                            .insert(Visibility::Visible);
-                    }
-                    if let Some(player) = b.player_entity {
-                        commands.entity(player).insert(Visibility::Visible);
-                    }
-                    b.phase = Phase::Swirl { elapsed: 0.0 };
-                }
-            }
             BattleRequest::Action { name, handler } => {
                 if let Some(b) = battle_state.as_mut() {
                     b.actions.insert(name, handler);
@@ -726,96 +611,27 @@ pub(crate) fn battle_requests(
     }
     if let Some(result) = end {
         if let Some(b) = battle_state.as_mut() {
-            bevy::log::warn!(
-                "battle: drain received end_battle('{result}'), phase={:?}",
-                b.phase
-            );
-            // The Returning phase owns the exit: fade, restore, then the
-            // state flip.
             b.result = Some(result);
-            b.phase = Phase::Returning { elapsed: 0.0 };
         } else {
             bevy::log::warn!("battle: end_battle with no battle running");
         }
+        // Back through the transition state: the cleanup fires at the
+        // covered point, then the black falls onto the scene.
+        transition.begin(
+            crate::transition::TransitionKind::Battle,
+            crate::transition::TransitionDirection::Returning,
+        );
+        next_state.set(GameState::Transition);
     }
 }
 
 /// The battle-internal machine: phases, the turn sequencer, the fade.
-pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>) {
-    let Some(state) = params.state.as_mut() else {
-        return;
-    };
-
-    // The phase machine. No camera moves: each state owns its camera
-    // and the activation sync swaps the views.
-    let dt = time.delta().as_secs_f32();
-    let mut finished = false;
-    match state.phase {
-        Phase::Freezing => {
-            // Waiting for the capture system (Update schedule —
-            // readbacks spawned from FixedUpdate never complete); the
-            // Frozen request advances the phase. A stalled capture
-            // can't hold the battle hostage.
-            state.freezing_elapsed += dt;
-            // The Frozen request advances the phase; this is just the
-            // stalled-capture safety net.
-            if state.freezing_elapsed > FREEZE_TIMEOUT_SECS {
-                state.phase = Phase::Swirl { elapsed: 0.0 };
-            }
-        }
-        Phase::Swirl { mut elapsed } => {
-            elapsed += dt;
-            // The frozen picture zooms (in the transition shader) while
-            // the black cover rises over it; at full cover it drops
-            // away.
-            let t = (elapsed / SWIRL_SECS).min(1.0);
-            params.transition.mode = crate::transition::TransitionMode::BlackRise;
-            params.transition.progress = t;
-            if t >= 1.0 {
-                for mut visibility in &mut params.frozen_quads {
-                    *visibility = Visibility::Hidden;
-                }
-                state.phase = Phase::Reveal { elapsed: 0.0 };
-            } else {
-                state.phase = Phase::Swirl { elapsed };
-            }
-        }
-        Phase::Reveal { mut elapsed } => {
-            elapsed += dt;
-            // The black cover falls away, revealing the live battle.
-            let t = (elapsed / SWIRL_SECS).min(1.0);
-            params.transition.mode = crate::transition::TransitionMode::BlackFall;
-            params.transition.progress = 1.0 - t;
-            if t >= 1.0 {
-                params.transition.mode = crate::transition::TransitionMode::Idle;
-                state.phase = Phase::Running;
-            } else {
-                state.phase = Phase::Reveal { elapsed };
-            }
-        }
-        Phase::Returning { mut elapsed } => {
-            elapsed += dt;
-            // The black cover rises over the battle view; the peak
-            // hands the state back to the scene.
-            let t = (elapsed / SWIRL_SECS).min(1.0);
-            params.transition.mode = crate::transition::TransitionMode::BlackRise;
-            params.transition.progress = t;
-            if t >= 1.0 {
-                params.transition.mode = crate::transition::TransitionMode::BlackFall;
-                finished = true;
-            } else {
-                state.phase = Phase::Returning { elapsed };
-            }
-        }
-        Phase::Running => {
-            sequence_turn(&params.battle, &mut params.camera, state);
-        }
-    }
-    if finished {
-        // The state machine owns the exit: dropping the flag lets the
-        // OnExit cleanup (and every module's restore) run; the
-        // transition's BlackFall then fades the scene up.
-        params.next_state.set(GameState::Scene);
+/// One running-battle tick: find who acts, poll their brain, dispatch
+/// the action. The transition choreography lives in transition.rs; by
+/// the time this runs the world is the fight.
+pub(crate) fn battle_turns(mut params: BattleTurnParams) {
+    if let Some(state) = params.state.as_mut() {
+        sequence_turn(&params.battle, &params.camera, state);
     }
 }
 
@@ -939,12 +755,10 @@ pub(crate) fn stage_battle<'w, 's>(
         }
     }
     commands.insert_resource(Battle {
-        phase: Phase::Freezing,
         arena,
         participants,
         actions: std::mem::take(&mut pending.actions),
         result: None,
-        freezing_elapsed: 0.0,
         player_entity,
         player_return,
     });
@@ -957,14 +771,10 @@ pub(crate) fn cleanup_battle(
     battle: Option<Res<Battle>>,
     handle: ResMut<BattleHandle>,
     ui: Res<UiApi>,
-    mut transition: ResMut<crate::transition::TransitionState>,
 ) {
     let Some(battle) = battle else {
         return;
     };
-    // The transition's BlackFall fades the scene up on the other side.
-    transition.mode = crate::transition::TransitionMode::BlackFall;
-    transition.progress = 1.0;
     // A battle script that errored can't run its own exit cleanup, so
     // the engine sweeps every battle window regardless.
     ui.push(UiRequest::Close {
@@ -999,7 +809,7 @@ pub(crate) fn cleanup_battle(
 /// ask their brain, dispatch the chosen action.
 fn sequence_turn(
     battle: &BattleHandle,
-    camera: &mut Query<(&mut Transform, &mut Projection), With<BattleCamera>>,
+    camera: &Query<(&Transform, &Projection), With<BattleCamera>>,
     state: &mut Battle,
 ) {
     // Script-side bag mutations land in the store ("bag:<id>:<key>");
@@ -1140,29 +950,6 @@ fn run_action(handler: &ActionHandler, actor_id: &str) -> f32 {
 
 /// Spawns the fullscreen fade quad once at startup; the battle engine
 /// only re-alphas its material.
-pub(crate) fn setup_fade(
-    mut commands: Commands,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    bubbles: Res<crate::systems::bubble::BubbleAssets>,
-) {
-    // The frozen-frame curtain: a long-lived quad spawned at boot so its
-    // visibility chain is established from the start — a quad spawned
-    // mid-game via commands never got its InheritedVisibility computed
-    // and stayed culled forever. It holds the captured scene picture
-    // during the swirl; textureless and hidden between battles.
-    let frozen_material = materials.add(ColorMaterial::default());
-    commands.insert_resource(FrozenMaterial(frozen_material.clone()));
-    let center = screen_to_world(Vec2::new(160.0, 120.0));
-    commands.spawn((
-        BattleFrozen,
-        Mesh2d(bubbles.rect.clone()),
-        MeshMaterial2d(frozen_material),
-        Visibility::Hidden,
-        Transform::from_translation(center.extend(1.4)).with_scale(Vec3::new(340.0, 260.0, 1.0)),
-        RenderLayers::layer(crate::screen::UI_LAYER),
-    ));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,7 +957,6 @@ mod tests {
     #[test]
     fn the_lowest_time_until_act_acts_first() {
         let battle = Battle {
-            phase: Phase::Running,
             arena: Entity::PLACEHOLDER,
             participants: vec![
                 Combatant {
@@ -1192,7 +978,6 @@ mod tests {
             ],
             actions: BTreeMap::new(),
             result: None,
-            freezing_elapsed: 0.0,
             player_entity: None,
             player_return: None,
         };

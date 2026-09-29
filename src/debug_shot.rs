@@ -179,8 +179,7 @@ pub fn check_requests<'w, 's>(
                     childrens.get(battle.arena).map(|ch| ch.len())
                 ));
                 lines.push(format!(
-                    "battle: phase={:?} participants={:?} actions={:?}",
-                    battle.phase,
+                    "battle: participants={:?} actions={:?}",
                     battle
                         .participants
                         .iter()

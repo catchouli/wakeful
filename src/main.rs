@@ -162,7 +162,7 @@ fn main() {
             load_ui_config,
             bubble::setup,
             ui::setup,
-            battle::setup_fade,
+            transition::setup,
             world::spawn_world,
             world_script::startup,
             scene_loader::load_scene,
@@ -174,6 +174,7 @@ fn main() {
         (
             sys_input::quit_on_escape,
             camera::sync_camera_activation,
+            transition::capture.run_if(in_state(game_state::GameState::Transition)),
             transition::drive_transition,
             screen::resize_present,
             screen::validate_post_process_layout,
@@ -216,12 +217,18 @@ fn main() {
             .chain(),
     )
     .add_systems(
-        OnEnter(game_state::GameState::Battle),
-        (battle::stage_battle, scene_loader::suspend_scene),
+        Update,
+        (battle::stage_battle, scene_loader::suspend_scene)
+            .run_if(in_state(game_state::GameState::Transition))
+            .run_if(transition::at_covered)
+            .run_if(transition::entering),
     )
     .add_systems(
-        OnExit(game_state::GameState::Battle),
-        (battle::cleanup_battle, scene_loader::resume_scene),
+        Update,
+        (battle::cleanup_battle, scene_loader::resume_scene)
+            .run_if(in_state(game_state::GameState::Transition))
+            .run_if(transition::at_covered)
+            .run_if(transition::returning),
     );
 
     #[cfg(debug_assertions)]

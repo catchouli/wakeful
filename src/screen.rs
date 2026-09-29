@@ -109,7 +109,6 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(GameImage(handle.clone()));
 
     spawn_ui_camera(&mut commands, &handle);
-    crate::transition::spawn_transition_camera(&mut commands, &handle);
 
     // The present camera owns the window: black bars, then the finished
     // game image, fit-scaled and letterboxed. The CRT material rides
