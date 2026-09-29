@@ -302,8 +302,6 @@ pub(crate) struct Battle {
     /// Action handlers by name.
     pub(crate) actions: BTreeMap<String, ActionHandler>,
     pub(crate) result: Option<String>,
-    /// The Freezing phase fires the capture exactly once.
-    pub(crate) capture_requested: bool,
     /// How long the Freezing phase has waited for its capture.
     pub(crate) freezing_elapsed: f32,
     /// The field player's pose before the battle, restored on return.
@@ -599,12 +597,8 @@ pub(crate) struct BattleTurnParams<'w, 's> {
     pub(crate) next_state: ResMut<'w, NextState<GameState>>,
     pub(crate) camera:
         Query<'w, 's, (&'static mut Transform, &'static mut Projection), With<BattleCamera>>,
-    pub(crate) frozen_quads: Query<
-        'w,
-        's,
-        (&'static mut Transform, &'static mut Visibility),
-        (With<BattleFrozen>, Without<BattleCamera>),
-    >,
+    pub(crate) frozen_quads:
+        Query<'w, 's, &'static mut Visibility, (With<BattleFrozen>, Without<BattleCamera>)>,
     pub(crate) transition: ResMut<'w, crate::transition::TransitionState>,
 }
 
@@ -624,6 +618,7 @@ pub(crate) fn battle_requests(
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    game_image: Option<Res<crate::screen::GameImage>>,
     frozen_material: Res<FrozenMaterial>,
     mut frozen_visibilities: Query<
         &'static mut Visibility,
@@ -638,6 +633,45 @@ pub(crate) fn battle_requests(
                     warn!("start_battle ignored: a battle is already starting");
                 }
                 pending.def = Some(def);
+                // Capture the scene *before* the state flip: while this
+                // runs the street is still fully on screen, and the
+                // readback completes over the next frames while OnEnter
+                // stages the battle behind the curtain.
+                if let Some(game_image) = game_image.as_ref() {
+                    commands
+                        .spawn(Readback::texture(game_image.0.clone()))
+                        .observe(
+                            move |trigger: On<ReadbackComplete>,
+                                  mut images: ResMut<Assets<Image>>,
+                                  mut commands: Commands,
+                                  handle: Res<BattleHandle>| {
+                                let expected = (crate::screen::GAME_WIDTH
+                                    * crate::screen::GAME_HEIGHT
+                                    * 4) as usize;
+                                if trigger.data.len() != expected {
+                                    warn!(
+                                        "battle: field capture came back {} bytes",
+                                        trigger.data.len()
+                                    );
+                                    return;
+                                }
+                                let image = Image::new(
+                                    Extent3d {
+                                        width: crate::screen::GAME_WIDTH,
+                                        height: crate::screen::GAME_HEIGHT,
+                                        depth_or_array_layers: 1,
+                                    },
+                                    TextureDimension::D2,
+                                    trigger.data.clone(),
+                                    TextureFormat::Rgba8UnormSrgb,
+                                    RenderAssetUsages::MAIN_WORLD,
+                                );
+                                let texture = images.add(image);
+                                handle.push(BattleRequest::Frozen { texture });
+                                commands.entity(trigger.entity).remove::<Readback>();
+                            },
+                        );
+                }
                 next_state.set(GameState::Battle);
             }
             BattleRequest::End { result } => end = Some(result),
@@ -723,23 +757,22 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
             // Frozen request advances the phase. A stalled capture
             // can't hold the battle hostage.
             state.freezing_elapsed += dt;
+            // The Frozen request advances the phase; this is just the
+            // stalled-capture safety net.
             if state.freezing_elapsed > FREEZE_TIMEOUT_SECS {
                 state.phase = Phase::Swirl { elapsed: 0.0 };
             }
         }
         Phase::Swirl { mut elapsed } => {
             elapsed += dt;
-            // The frozen picture zooms gently while the black cover
-            // rises over it; at full cover it drops away.
+            // The frozen picture zooms (in the transition shader) while
+            // the black cover rises over it; at full cover it drops
+            // away.
             let t = (elapsed / SWIRL_SECS).min(1.0);
-            let zoom = 1.0 + 0.18 * ease(t);
-            for (mut transform, _) in &mut params.frozen_quads {
-                transform.scale = Vec3::new(340.0 * zoom, 260.0 * zoom, 1.0);
-            }
             params.transition.mode = crate::transition::TransitionMode::BlackRise;
             params.transition.progress = t;
             if t >= 1.0 {
-                for (_, mut visibility) in &mut params.frozen_quads {
+                for mut visibility in &mut params.frozen_quads {
                     *visibility = Visibility::Hidden;
                 }
                 state.phase = Phase::Reveal { elapsed: 0.0 };
@@ -911,7 +944,6 @@ pub(crate) fn stage_battle<'w, 's>(
         participants,
         actions: std::mem::take(&mut pending.actions),
         result: None,
-        capture_requested: false,
         freezing_elapsed: 0.0,
         player_entity,
         player_return,
@@ -1104,60 +1136,6 @@ fn run_action(handler: &ActionHandler, actor_id: &str) -> f32 {
     }
 }
 
-/// Captures the live game image: a GPU readback whose observer hands
-/// the frame back as a texture (see the Frozen request). Lives in the
-/// Update schedule — readbacks spawned from FixedUpdate never
-/// complete.
-pub(crate) fn capture_frame(
-    mut commands: Commands,
-    game_image: Option<Res<crate::screen::GameImage>>,
-    battle: Option<ResMut<Battle>>,
-) {
-    let (Some(game_image), Some(mut battle)) = (game_image, battle) else {
-        return;
-    };
-    if battle.phase != Phase::Freezing || battle.capture_requested {
-        return;
-    }
-    battle.capture_requested = true;
-    commands
-        .spawn(Readback::texture(game_image.0.clone()))
-        .observe(
-            move |trigger: On<ReadbackComplete>,
-                  mut images: ResMut<Assets<Image>>,
-                  mut commands: Commands,
-                  handle: Res<BattleHandle>| {
-                let expected =
-                    (crate::screen::GAME_WIDTH * crate::screen::GAME_HEIGHT * 4) as usize;
-                if trigger.data.len() != expected {
-                    warn!(
-                        "battle: field capture came back {} bytes",
-                        trigger.data.len()
-                    );
-                    return;
-                }
-                let image = Image::new(
-                    Extent3d {
-                        width: crate::screen::GAME_WIDTH,
-                        height: crate::screen::GAME_HEIGHT,
-                        depth_or_array_layers: 1,
-                    },
-                    TextureDimension::D2,
-                    trigger.data.clone(),
-                    TextureFormat::Rgba8UnormSrgb,
-                    RenderAssetUsages::MAIN_WORLD,
-                );
-                let texture = images.add(image);
-                handle.push(BattleRequest::Frozen { texture });
-                commands.entity(trigger.entity).remove::<Readback>();
-            },
-        );
-}
-
-fn ease(t: f32) -> f32 {
-    t * t * (3.0 - 2.0 * t)
-}
-
 // ---------------------------------------------------------------- fade overlay
 
 /// Spawns the fullscreen fade quad once at startup; the battle engine
@@ -1214,7 +1192,6 @@ mod tests {
             ],
             actions: BTreeMap::new(),
             result: None,
-            capture_requested: false,
             freezing_elapsed: 0.0,
             player_entity: None,
             player_return: None,

@@ -132,7 +132,9 @@ fn main() {
     }))
     .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
     .add_plugins(FullscreenMaterialPlugin::<transition::TransitionPostProcess>::default())
-    .add_plugins(FullscreenMaterialPlugin::<display::FinalPostMaterial>::default())
+    // The dither/CRT final post is off while the transition is being
+    // debugged; the two fullscreen plugins together break the passes.
+    // .add_plugins(FullscreenMaterialPlugin::<display::FinalPostMaterial>::default())
     .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
     .add_plugins(editor::plugin)
     .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
@@ -192,10 +194,7 @@ fn main() {
     // cached applies the same frame the teleport lands.
     .add_systems(
         Update,
-        (
-            battle::capture_frame.run_if(in_state(game_state::GameState::Battle)),
-            scene_loader::transition_scene.before(scene_loader::apply_scene),
-        ),
+        (scene_loader::transition_scene.before(scene_loader::apply_scene),),
     )
     .add_systems(
         FixedUpdate,
