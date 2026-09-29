@@ -1,0 +1,28 @@
+//! The fullscreen transition: mixes the game image toward black by the
+//! engine-driven progress. Mode 1 = rise (progress 0→1), mode 2 = fall
+//! (progress 1→0); mode 0 passes the image through untouched.
+
+#import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
+
+@group(0) @binding(0) var screen_texture: texture_2d<f32>;
+@group(0) @binding(1) var texture_sampler: sampler;
+
+struct TransitionPostProcess {
+    mode: u32,
+    progress: f32,
+}
+
+@group(0) @binding(2) var<uniform> settings: TransitionPostProcess;
+
+@fragment
+fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSampleLevel(screen_texture, texture_sampler, in.uv, 0.0).rgb;
+
+    var covered = 0.0;
+    if (settings.mode == 1u) {
+        covered = settings.progress;
+    } else if (settings.mode == 2u) {
+        covered = 1.0 - settings.progress;
+    }
+    return vec4(mix(color, vec3<f32>(0.0), clamp(covered, 0.0, 1.0)), 1.0);
+}

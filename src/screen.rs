@@ -8,13 +8,13 @@
 //!
 //! This module owns the camera stack that draws into that texture, in
 //! order: background (0, `scene.rs`), 3D (1, `camera.rs`), UI (2),
+//! transition (3, `transition.rs`), present (4, `display.rs`),
 //! post-process (3), then the present camera (4) takes the finished
 //! image to the window. The UI camera draws everything on [`UI_LAYER`];
 //! the post-process camera draws nothing and exists to carry fullscreen
 //! effects over the finished frame.
 
 use crate::display;
-use crate::dither::{self, DitherPostProcess};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
@@ -55,26 +55,17 @@ pub struct PresentSprite;
 /// Draw orders of the cameras after 3D content (order 1) hits the game
 /// image; see the module docs for the full stack.
 const UI_ORDER: isize = 2;
-const POST_PROCESS_ORDER: isize = 3;
+pub(crate) const TRANSITION_ORDER: isize = 3;
 const PRESENT_ORDER: isize = 4;
 
 /// Render layer the UI camera draws — speech bubbles today; menus and
 /// other UI screens can join.
 pub(crate) const UI_LAYER: usize = 3;
 
-/// Render layer no content uses, so the post-process camera's main pass
-/// stays empty and its effects see the finished frame.
-const POST_PROCESS_LAYER: usize = 31;
-
 /// Marks the UI camera, which draws [`UI_LAYER`] into the game image
 /// after 3D content.
 #[derive(Component)]
 pub(crate) struct UiCamera;
-
-/// Marks the post-process camera: the last camera into the game image,
-/// carrying the fullscreen effects that must cover the finished frame.
-#[derive(Component)]
-pub(crate) struct PostProcessCamera;
 
 /// Spawns the UI camera. Separate from [`setup_screen`] so the headless
 /// snapshot_mac_os binary can share it against its own game image.
@@ -90,24 +81,6 @@ pub(crate) fn spawn_ui_camera(commands: &mut Commands, game_image: &Handle<Image
         Msaa::Off,
         RenderTarget::Image(game_image.clone().into()),
         RenderLayers::layer(UI_LAYER),
-    ));
-}
-
-/// Spawns the post-process camera. Separate from [`setup_screen`] so the
-/// headless snapshot_mac_os binary can share it against its own game image.
-pub(crate) fn spawn_post_process_camera(commands: &mut Commands, game_image: &Handle<Image>) {
-    commands.spawn((
-        PostProcessCamera,
-        Camera2d,
-        Camera {
-            order: POST_PROCESS_ORDER,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        Msaa::Off,
-        DitherPostProcess { ..dither::tuned() },
-        RenderTarget::Image(game_image.clone().into()),
-        RenderLayers::layer(POST_PROCESS_LAYER),
     ));
 }
 
@@ -137,7 +110,7 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(GameImage(handle.clone()));
 
     spawn_ui_camera(&mut commands, &handle);
-    spawn_post_process_camera(&mut commands, &handle);
+    crate::transition::spawn_transition_camera(&mut commands, &handle);
 
     // The present camera owns the window: black bars, then the finished
     // game image, fit-scaled and letterboxed. The CRT material rides
@@ -156,7 +129,7 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         Msaa::Off,
         RenderLayers::layer(1),
         PresentSprite,
-        display::tuned_crt(),
+        display::tuned_final_post(),
         Sprite {
             image: handle,
             ..default()
@@ -216,13 +189,17 @@ fn post_process_violations(cameras: &[GameImageCamera]) -> Vec<String> {
     violations
 }
 
-/// Warns when a camera breaks the layout the post-process pass depends
-/// on (see [`post_process_violations`]). The query is tiny, so this runs
-/// every frame; it warns only when the violation set changes, so a
-/// steady problem is one warning, not a spam.
+/// Warns when a camera breaks the layout the final post-processing pass
+/// depends on (see [`post_process_violations`]). The query is tiny, so
+/// this runs every frame; it warns only when the violation set changes,
+/// so a steady problem is one warning, not a spam.
 pub(crate) fn validate_post_process_layout(
     game_image: Res<GameImage>,
-    cameras: Query<(&Camera, &RenderTarget, Option<&DitherPostProcess>)>,
+    cameras: Query<(
+        &Camera,
+        &RenderTarget,
+        Option<&crate::display::FinalPostMaterial>,
+    )>,
     mut seen: Local<Vec<String>>,
 ) {
     let mut layout = Vec::new();

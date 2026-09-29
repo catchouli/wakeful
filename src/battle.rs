@@ -41,7 +41,6 @@ const ARENA_HEIGHT: f32 = 10.0;
 
 /// How long the frozen-frame swirl and the fade home each take.
 const SWIRL_SECS: f32 = 1.5;
-const TRANSITION_SECS: f32 = 4.0;
 /// A stalled field capture can't hold the battle hostage.
 const FREEZE_TIMEOUT_SECS: f32 = 2.0;
 
@@ -303,8 +302,6 @@ pub(crate) struct Battle {
     /// Action handlers by name.
     pub(crate) actions: BTreeMap<String, ActionHandler>,
     pub(crate) result: Option<String>,
-    /// The frozen field frame quad, dropped once the battle reveals.
-    pub(crate) frozen: Option<Entity>,
     /// The Freezing phase fires the capture exactly once.
     pub(crate) capture_requested: bool,
     /// How long the Freezing phase has waited for its capture.
@@ -325,28 +322,6 @@ impl Battle {
             .map(|(i, _)| i)
     }
 
-    /// Fade strength for the current phase: peaks mid-swing so the
-    /// camera cut happens behind an opaque screen, clear for the fight
-    /// itself, then the same shape on the way home.
-    pub(crate) fn fade(&self) -> f32 {
-        let half = TRANSITION_SECS / 2.0;
-        let shape = |elapsed: f32| {
-            if elapsed <= half {
-                elapsed / half
-            } else {
-                (1.0 - (elapsed - half) / half).max(0.0)
-            }
-        };
-        match self.phase {
-            Phase::Freezing => 0.0,
-            // The swirl rises to the cut; the reveal falls from it.
-            Phase::Swirl { elapsed } => (elapsed / SWIRL_SECS).min(1.0),
-            Phase::Reveal { elapsed } => 1.0 - (elapsed / SWIRL_SECS).min(1.0),
-            Phase::Running => 0.0,
-            Phase::Returning { elapsed } => shape(elapsed),
-        }
-    }
-
     /// Whether the battle's own 3D view should render right now: not
     /// during the capture (the scene view persists under the frozen
     /// frame, so the swap hides behind a picture of itself), and not
@@ -356,14 +331,15 @@ impl Battle {
         match &self.phase {
             Phase::Freezing => false,
             Phase::Swirl { .. } | Phase::Reveal { .. } | Phase::Running => true,
-            Phase::Returning { elapsed } => *elapsed < TRANSITION_SECS / 2.0,
+            Phase::Returning { elapsed } => *elapsed < SWIRL_SECS / 2.0,
         }
     }
 }
 
-/// The persistent fade overlay quad. Its material alpha is the fade.
-#[derive(Component)]
-pub(crate) struct BattleFade;
+/// The frozen-frame curtain's material: textureless (black) between
+/// battles, holding the captured scene picture during the swirl.
+#[derive(Resource)]
+pub(crate) struct FrozenMaterial(pub(crate) Handle<ColorMaterial>);
 
 /// The frozen field frame shown during the swirl.
 #[derive(Component)]
@@ -615,18 +591,21 @@ pub(crate) fn camera_from_look(position: Vec3, look: Vec3) -> (Vec3, Vec2) {
 type PlayerTransforms<'w, 's> =
     Query<'w, 's, (Entity, &'static mut Transform), (With<Player>, Without<BattleCamera>)>;
 
+#[allow(clippy::type_complexity)]
 #[derive(SystemParam)]
 pub(crate) struct BattleTurnParams<'w, 's> {
-    pub(crate) commands: Commands<'w, 's>,
     pub(crate) battle: ResMut<'w, BattleHandle>,
     pub(crate) state: Option<ResMut<'w, Battle>>,
     pub(crate) next_state: ResMut<'w, NextState<GameState>>,
     pub(crate) camera:
         Query<'w, 's, (&'static mut Transform, &'static mut Projection), With<BattleCamera>>,
-    pub(crate) fades: Query<'w, 's, &'static MeshMaterial2d<ColorMaterial>, With<BattleFade>>,
-    pub(crate) frozen_quads:
-        Query<'w, 's, &'static mut Transform, (With<BattleFrozen>, Without<BattleCamera>)>,
-    pub(crate) materials: ResMut<'w, Assets<ColorMaterial>>,
+    pub(crate) frozen_quads: Query<
+        'w,
+        's,
+        (&'static mut Transform, &'static mut Visibility),
+        (With<BattleFrozen>, Without<BattleCamera>),
+    >,
+    pub(crate) transition: ResMut<'w, crate::transition::TransitionState>,
 }
 
 /// Drains script requests, runs phases, and sequences turns. Sits at
@@ -645,7 +624,11 @@ pub(crate) fn battle_requests(
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    bubble_assets: Res<crate::systems::bubble::BubbleAssets>,
+    frozen_material: Res<FrozenMaterial>,
+    mut frozen_visibilities: Query<
+        &'static mut Visibility,
+        (With<BattleFrozen>, Without<BattleCamera>),
+    >,
 ) {
     let mut end: Option<String> = None;
     for request in battle.take_requests() {
@@ -660,12 +643,16 @@ pub(crate) fn battle_requests(
             BattleRequest::End { result } => end = Some(result),
             BattleRequest::Frozen { texture } => {
                 if let Some(b) = battle_state.as_mut() {
-                    let quad =
-                        spawn_frozen_frame(&mut commands, &mut materials, &bubble_assets, texture);
-                    b.frozen = Some(quad);
-                    b.phase = Phase::Swirl { elapsed: 0.0 };
-                    // The frozen curtain is up: the fighters take the
-                    // stage behind it.
+                    // The boot-spawned curtain takes the captured
+                    // picture and covers the screen at full opacity.
+                    if let Some(mut material) = materials.get_mut(&frozen_material.0) {
+                        material.texture = Some(texture);
+                    }
+                    for mut visibility in &mut frozen_visibilities {
+                        *visibility = Visibility::Visible;
+                    }
+                    // The curtain is up: the fighters take the stage
+                    // behind it.
                     for combatant in &b.participants {
                         commands
                             .entity(combatant.entity)
@@ -674,6 +661,7 @@ pub(crate) fn battle_requests(
                     if let Some(player) = b.player_entity {
                         commands.entity(player).insert(Visibility::Visible);
                     }
+                    b.phase = Phase::Swirl { elapsed: 0.0 };
                 }
             }
             BattleRequest::Action { name, handler } => {
@@ -741,11 +729,19 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
         }
         Phase::Swirl { mut elapsed } => {
             elapsed += dt;
+            // The frozen picture zooms gently while the black cover
+            // rises over it; at full cover it drops away.
             let t = (elapsed / SWIRL_SECS).min(1.0);
-            if let Some(quad) = state.frozen {
-                zoom_frozen_frame(&mut params.frozen_quads, quad, 1.0 + 0.18 * ease(t));
+            let zoom = 1.0 + 0.18 * ease(t);
+            for (mut transform, _) in &mut params.frozen_quads {
+                transform.scale = Vec3::new(340.0 * zoom, 260.0 * zoom, 1.0);
             }
+            params.transition.mode = crate::transition::TransitionMode::BlackRise;
+            params.transition.progress = t;
             if t >= 1.0 {
+                for (_, mut visibility) in &mut params.frozen_quads {
+                    *visibility = Visibility::Hidden;
+                }
                 state.phase = Phase::Reveal { elapsed: 0.0 };
             } else {
                 state.phase = Phase::Swirl { elapsed };
@@ -753,10 +749,12 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
         }
         Phase::Reveal { mut elapsed } => {
             elapsed += dt;
-            if elapsed >= SWIRL_SECS {
-                if let Some(quad) = state.frozen.take() {
-                    params.commands.entity(quad).despawn();
-                }
+            // The black cover falls away, revealing the live battle.
+            let t = (elapsed / SWIRL_SECS).min(1.0);
+            params.transition.mode = crate::transition::TransitionMode::BlackFall;
+            params.transition.progress = 1.0 - t;
+            if t >= 1.0 {
+                params.transition.mode = crate::transition::TransitionMode::Idle;
                 state.phase = Phase::Running;
             } else {
                 state.phase = Phase::Reveal { elapsed };
@@ -764,11 +762,13 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
         }
         Phase::Returning { mut elapsed } => {
             elapsed += dt;
-            let t = (elapsed / TRANSITION_SECS).min(1.0);
-            if t >= 0.5 {
-                // The opaque peak: the scene returns behind the black
-                // (OnExit cleanup + resume), and battle_exit_fade fades
-                // the scene up on the other side.
+            // The black cover rises over the battle view; the peak
+            // hands the state back to the scene.
+            let t = (elapsed / SWIRL_SECS).min(1.0);
+            params.transition.mode = crate::transition::TransitionMode::BlackRise;
+            params.transition.progress = t;
+            if t >= 1.0 {
+                params.transition.mode = crate::transition::TransitionMode::BlackFall;
                 finished = true;
             } else {
                 state.phase = Phase::Returning { elapsed };
@@ -780,16 +780,9 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams, time: Res<Time<Fixed>>)
     }
     if finished {
         // The state machine owns the exit: dropping the flag lets the
-        // OnExit cleanup (and every module's restore) run.
+        // OnExit cleanup (and every module's restore) run; the
+        // transition's BlackFall then fades the scene up.
         params.next_state.set(GameState::Scene);
-    }
-
-    // The fade tracks the phase; zero when no battle runs.
-    let alpha = state.fade();
-    for material in &params.fades {
-        if let Some(mut material) = params.materials.get_mut(material.id()) {
-            material.color.set_alpha(alpha);
-        }
     }
 }
 
@@ -918,42 +911,11 @@ pub(crate) fn stage_battle<'w, 's>(
         participants,
         actions: std::mem::take(&mut pending.actions),
         result: None,
-        frozen: None,
         capture_requested: false,
         freezing_elapsed: 0.0,
         player_entity,
         player_return,
     });
-}
-
-/// The black fade-up over the scene after a battle exits: the battle
-/// ended at the opaque peak, and this hands the screen back gently.
-#[derive(Resource)]
-pub(crate) struct BattleExitFade {
-    elapsed: f32,
-}
-
-/// Scene-side: fades the post-battle black away over half a second.
-pub(crate) fn battle_exit_fade(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut fade: Option<ResMut<BattleExitFade>>,
-    fades: Query<&MeshMaterial2d<ColorMaterial>, With<BattleFade>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    let Some(fade_state) = fade.as_mut() else {
-        return;
-    };
-    fade_state.elapsed += time.delta().as_secs_f32();
-    let alpha = (1.0 - fade_state.elapsed / 0.5).max(0.0);
-    for material_handle in &fades {
-        if let Some(mut material) = materials.get_mut(material_handle.id()) {
-            material.color.set_alpha(alpha);
-        }
-    }
-    if alpha <= 0.0 {
-        commands.remove_resource::<BattleExitFade>();
-    }
 }
 
 /// `OnExit(Battle)`: the arena and the fighters go, the frozen frame
@@ -963,11 +925,14 @@ pub(crate) fn cleanup_battle(
     battle: Option<Res<Battle>>,
     handle: ResMut<BattleHandle>,
     ui: Res<UiApi>,
+    mut transition: ResMut<crate::transition::TransitionState>,
 ) {
     let Some(battle) = battle else {
         return;
     };
-    commands.insert_resource(BattleExitFade { elapsed: 0.0 });
+    // The transition's BlackFall fades the scene up on the other side.
+    transition.mode = crate::transition::TransitionMode::BlackFall;
+    transition.progress = 1.0;
     // A battle script that errored can't run its own exit cleanup, so
     // the engine sweeps every battle window regardless.
     ui.push(UiRequest::Close {
@@ -993,9 +958,6 @@ pub(crate) fn cleanup_battle(
         }
     }
     commands.entity(battle.arena).despawn();
-    if let Some(quad) = battle.frozen {
-        commands.entity(quad).despawn();
-    }
     commands.remove_resource::<Battle>();
     handle.set_active(false);
     handle.clear_store();
@@ -1192,41 +1154,6 @@ pub(crate) fn capture_frame(
         );
 }
 
-/// The frozen field frame: a fullscreen textured quad just under the
-/// fade. The world keeps rendering behind it; nobody can tell.
-fn spawn_frozen_frame(
-    commands: &mut Commands,
-    materials: &mut Assets<ColorMaterial>,
-    bubble_assets: &crate::systems::bubble::BubbleAssets,
-    texture: Handle<Image>,
-) -> Entity {
-    let material = materials.add(ColorMaterial {
-        texture: Some(texture),
-        ..default()
-    });
-    let center = screen_to_world(Vec2::new(160.0, 120.0));
-    commands
-        .spawn((
-            BattleFrozen,
-            Mesh2d(bubble_assets.rect.clone()),
-            MeshMaterial2d(material),
-            Transform::from_translation(center.extend(1.4))
-                .with_scale(Vec3::new(340.0, 260.0, 1.0)),
-            RenderLayers::layer(crate::screen::UI_LAYER),
-        ))
-        .id()
-}
-
-fn zoom_frozen_frame(
-    transforms: &mut Query<&'static mut Transform, (With<BattleFrozen>, Without<BattleCamera>)>,
-    quad: Entity,
-    scale: f32,
-) {
-    if let Ok(mut transform) = transforms.get_mut(quad) {
-        transform.scale = Vec3::new(340.0 * scale, 260.0 * scale, 1.0);
-    }
-}
-
 fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
@@ -1240,17 +1167,20 @@ pub(crate) fn setup_fade(
     mut materials: ResMut<Assets<ColorMaterial>>,
     bubbles: Res<crate::systems::bubble::BubbleAssets>,
 ) {
-    let material = materials.add(ColorMaterial {
-        color: Color::srgba(0.0, 0.0, 0.0, 0.0),
-        ..default()
-    });
-    // A quad over the whole virtual screen, just above the panels.
+    // The frozen-frame curtain: a long-lived quad spawned at boot so its
+    // visibility chain is established from the start — a quad spawned
+    // mid-game via commands never got its InheritedVisibility computed
+    // and stayed culled forever. It holds the captured scene picture
+    // during the swirl; textureless and hidden between battles.
+    let frozen_material = materials.add(ColorMaterial::default());
+    commands.insert_resource(FrozenMaterial(frozen_material.clone()));
     let center = screen_to_world(Vec2::new(160.0, 120.0));
     commands.spawn((
-        BattleFade,
+        BattleFrozen,
         Mesh2d(bubbles.rect.clone()),
-        MeshMaterial2d(material),
-        Transform::from_translation(center.extend(1.5)).with_scale(Vec3::new(340.0, 260.0, 1.0)),
+        MeshMaterial2d(frozen_material),
+        Visibility::Hidden,
+        Transform::from_translation(center.extend(1.4)).with_scale(Vec3::new(340.0, 260.0, 1.0)),
         RenderLayers::layer(crate::screen::UI_LAYER),
     ));
 }
@@ -1284,7 +1214,6 @@ mod tests {
             ],
             actions: BTreeMap::new(),
             result: None,
-            frozen: None,
             capture_requested: false,
             freezing_elapsed: 0.0,
             player_entity: None,
@@ -1296,48 +1225,6 @@ mod tests {
                 .map(|i| battle.participants[i].id.as_str()),
             Some("goblin")
         );
-    }
-
-    #[test]
-    fn the_fade_tracks_the_transition() {
-        let mut battle = Battle {
-            phase: Phase::Freezing,
-            arena: Entity::PLACEHOLDER,
-            participants: vec![],
-            actions: BTreeMap::new(),
-            result: None,
-            frozen: None,
-            capture_requested: false,
-            freezing_elapsed: 0.0,
-            player_entity: None,
-            player_return: None,
-        };
-        battle.phase = Phase::Freezing;
-        assert_eq!(battle.fade(), 0.0);
-        battle.phase = Phase::Swirl {
-            elapsed: SWIRL_SECS / 2.0,
-        };
-        assert_eq!(battle.fade(), 0.5);
-        battle.phase = Phase::Swirl {
-            elapsed: SWIRL_SECS,
-        };
-        assert_eq!(battle.fade(), 1.0, "opaque at the cut");
-        battle.phase = Phase::Reveal { elapsed: 0.0 };
-        assert_eq!(battle.fade(), 1.0);
-        battle.phase = Phase::Reveal {
-            elapsed: SWIRL_SECS,
-        };
-        assert_eq!(battle.fade(), 0.0, "clear for the fight");
-        battle.phase = Phase::Running;
-        assert_eq!(battle.fade(), 0.0);
-        battle.phase = Phase::Returning {
-            elapsed: TRANSITION_SECS / 2.0,
-        };
-        assert_eq!(battle.fade(), 1.0, "opaque at the way-home cut");
-        battle.phase = Phase::Returning {
-            elapsed: TRANSITION_SECS,
-        };
-        assert_eq!(battle.fade(), 0.0);
     }
 
     #[test]

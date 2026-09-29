@@ -3,7 +3,6 @@ mod battle;
 #[cfg(debug_assertions)]
 mod debug_shot;
 mod display;
-mod dither;
 mod editor;
 mod game_state;
 mod input;
@@ -13,6 +12,7 @@ mod screen;
 mod scripts;
 mod systems;
 mod text;
+mod transition;
 mod world_state;
 
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
@@ -121,6 +121,7 @@ type GameCameraQuery<'w, 's> = Query<
 
 fn main() {
     let mut app = App::new();
+    app.init_resource::<transition::TransitionState>();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "wakeful".into(),
@@ -130,8 +131,8 @@ fn main() {
         ..default()
     }))
     .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
-    .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
-    .add_plugins(FullscreenMaterialPlugin::<display::CrtMaterial>::default())
+    .add_plugins(FullscreenMaterialPlugin::<transition::TransitionPostProcess>::default())
+    .add_plugins(FullscreenMaterialPlugin::<display::FinalPostMaterial>::default())
     .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
     .add_plugins(editor::plugin)
     .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
@@ -171,6 +172,7 @@ fn main() {
         (
             sys_input::quit_on_escape,
             camera::sync_camera_activation,
+            transition::drive_transition,
             screen::resize_present,
             screen::validate_post_process_layout,
             display::sync_display_effects,
@@ -209,7 +211,6 @@ fn main() {
             scene_loader::run_scene_scripts.run_if(in_state(game_state::GameState::Scene)),
             world_script::run_world_scripts,
             battle::battle_turns.run_if(in_state(game_state::GameState::Battle)),
-            battle::battle_exit_fade.run_if(in_state(game_state::GameState::Scene)),
             ui::drain,
             ui::sync_cursor,
         )
