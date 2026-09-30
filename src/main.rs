@@ -234,7 +234,12 @@ fn main() {
     // (Also fires once at boot, where both no-op harmlessly.)
     .add_systems(
         OnEnter(game_state::GameState::Scene),
-        (battle::cleanup_battle, scene_loader::resume_scene),
+        (
+            battle::cleanup_battle,
+            scene_loader::resume_scene,
+            // The covered point: hand a queued scene warp to the swap.
+            teleport::release_warp,
+        ),
     );
 
     #[cfg(debug_assertions)]
