@@ -57,17 +57,17 @@ pub fn setup_game_camera(mut commands: Commands, game_image: Res<GameImage>) {
 /// so the activation can never drift from the state.
 pub fn sync_camera_activation(
     state: Res<State<GameState>>,
-    transition: Res<crate::transition::TransitionState>,
     mut scene: Query<&mut Camera, With<SceneCamera>>,
     mut battle_cameras: Query<&mut Camera, (With<BattleCamera>, Without<SceneCamera>)>,
 ) {
-    // The battle's view renders once the transition has staged it
-    // behind the cover; the scene's renders until then — including
-    // through the capture, so the curtain can only hold the scene.
+    // The transition never touches the cameras: the outgoing view keeps
+    // rendering (static — every motion system is state-gated) through
+    // the capture and the closing cover, and the covered flip swaps
+    // activation while the screen is fully black.
     let battle_active = match state.get() {
         GameState::Battle => true,
-        GameState::Transition => transition.battle_view(),
         GameState::Scene => false,
+        GameState::Transition => return,
     };
     for mut camera in &mut scene {
         camera.is_active = !battle_active;

@@ -15,7 +15,6 @@ mod text;
 mod transition;
 mod world_state;
 
-use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
@@ -131,9 +130,9 @@ fn main() {
         ..default()
     }))
     .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
-    .add_plugins(FullscreenMaterialPlugin::<transition::TransitionPostProcess>::default())
-    // The dither/CRT final post is off while the transition is being
-    // debugged; the two fullscreen plugins together break the passes.
+    .add_plugins(Material2dPlugin::<transition::TransitionMaterial>::default())
+    // The dither/CRT final post stays off: it is a fullscreen pass and
+    // re-enabling it needs its own verification pass.
     // .add_plugins(FullscreenMaterialPlugin::<display::FinalPostMaterial>::default())
     .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
     .add_plugins(editor::plugin)
@@ -215,7 +214,8 @@ fn main() {
             actor::run_actor_scripts.run_if(in_state(game_state::GameState::Scene)),
             animation::run_character_animations,
             scene_loader::run_scene_scripts.run_if(in_state(game_state::GameState::Scene)),
-            world_script::run_world_scripts,
+            world_script::run_world_scripts
+                .run_if(not(in_state(game_state::GameState::Transition))),
             battle::battle_turns.run_if(in_state(game_state::GameState::Battle)),
             ui::drain,
             ui::sync_cursor,
@@ -226,8 +226,11 @@ fn main() {
         OnEnter(game_state::GameState::Battle),
         (battle::stage_battle, scene_loader::suspend_scene),
     )
+    // Fires at the transition's covered point, behind the opaque cover:
+    // the battle teardown and the scene resume are never on screen.
+    // (Also fires once at boot, where both no-op harmlessly.)
     .add_systems(
-        OnExit(game_state::GameState::Battle),
+        OnEnter(game_state::GameState::Scene),
         (battle::cleanup_battle, scene_loader::resume_scene),
     );
 

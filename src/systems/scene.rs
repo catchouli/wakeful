@@ -351,7 +351,8 @@ pub(crate) fn suspend_scene(
     }
 }
 
-/// `OnExit(Battle)`: the scene comes back exactly as it was.
+    /// `OnEnter(Scene)`: fires at the transition's covered point — the
+    /// scene comes back exactly as it was.
 pub(crate) fn resume_scene(
     mut commands: Commands,
     mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,

@@ -7,12 +7,10 @@
 //! can't escape the virtual resolution.
 //!
 //! This module owns the camera stack that draws into that texture, in
-//! order: background (0, `scene.rs`), 3D (1, `camera.rs`), UI (2),
-//! transition (3, `transition.rs`), present (4, `display.rs`),
-//! post-process (3), then the present camera (4) takes the finished
-//! image to the window. The UI camera draws everything on [`UI_LAYER`];
-//! the post-process camera draws nothing and exists to carry fullscreen
-//! effects over the finished frame.
+//! order: background (0, `scene.rs`), 3D (1, `camera.rs`), UI (2) — the
+//! transition's cover quad rides the UI camera (`transition.rs`) — and
+//! present (4, `display.rs`). The UI camera draws everything on
+//! [`UI_LAYER`].
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -54,7 +52,6 @@ pub struct PresentSprite;
 /// Draw orders of the cameras after 3D content (order 1) hits the game
 /// image; see the module docs for the full stack.
 const UI_ORDER: isize = 2;
-pub(crate) const TRANSITION_ORDER: isize = 3;
 const PRESENT_ORDER: isize = 4;
 
 /// Render layer the UI camera draws — speech bubbles today; menus and

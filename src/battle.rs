@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::Player;
 use crate::game_state::GameState;
 use crate::input::InputManager;
+use crate::transition::{Effect, TransitionState};
 use crate::systems::animation::Locomotion;
 use crate::systems::camera::BattleCamera;
 use crate::world_state::WorldState;
@@ -554,12 +555,13 @@ pub(crate) struct BattleTurnParams<'w, 's> {
 /// Drains script requests in BOTH states: before a battle they
 /// accumulate into [`PendingBattleStart`] (whose `OnEnter` staging
 /// consumes them); during one they apply to the live battle. Start and
-/// End drive the state transition itself.
+/// End begin the transition that carries the game in or out.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn battle_requests(
     battle: ResMut<BattleHandle>,
     mut battle_state: Option<ResMut<Battle>>,
     mut next_state: ResMut<NextState<GameState>>,
+    mut transition: ResMut<TransitionState>,
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
 ) {
@@ -567,14 +569,14 @@ pub(crate) fn battle_requests(
     for request in battle.take_requests() {
         match request {
             BattleRequest::Start(def) => {
-                if pending.def.is_some() {
-                    warn!("start_battle ignored: a battle is already starting");
+                // Into the transition state: the swirl freezes the scene,
+                // and staging fires behind the cover (OnEnter(Battle)).
+                if transition.begin(GameState::Battle, Effect::Swirl) {
+                    pending.def = Some(def);
+                    next_state.set(GameState::Transition);
+                } else {
+                    warn!("start_battle ignored: a transition is already running");
                 }
-                pending.def = Some(def);
-                // STEP 1 (the direct-path test): the transition state is
-                // skipped — straight to the battle while the covered
-                // hooks are re-verified layer by layer.
-                next_state.set(GameState::Battle);
             }
             BattleRequest::End { result } => end = Some(result),
             BattleRequest::Action { name, handler } => {
@@ -603,14 +605,20 @@ pub(crate) fn battle_requests(
             }
         }
     }
-    if let Some(result) = end {
-        if let Some(b) = battle_state.as_mut() {
-            b.result = Some(result);
-        } else {
-            bevy::log::warn!("battle: end_battle with no battle running");
+        if let Some(result) = end {
+            if let Some(b) = battle_state.as_mut() {
+                b.result = Some(result);
+            } else {
+                bevy::log::warn!("battle: end_battle with no battle running");
+            }
+            // Back to the scene behind a plain fade; the teardown fires
+            // at the covered point (OnEnter(Scene)).
+            if transition.begin(GameState::Scene, Effect::Fade) {
+                next_state.set(GameState::Transition);
+            } else {
+                warn!("end_battle ignored: a transition is already running");
+            }
         }
-        next_state.set(GameState::Scene);
-    }
 }
 
 /// The battle-internal machine: phases, the turn sequencer, the fade.
@@ -752,8 +760,9 @@ pub(crate) fn stage_battle<'w, 's>(
     });
 }
 
-/// `OnExit(Battle)`: the arena and the fighters go, the frozen frame
-/// goes, and the scene modules restore themselves in their own hooks.
+/// `OnEnter(Scene)`: fires at the transition's covered point — the
+/// arena and the fighters go, and the scene modules restore themselves
+/// in their own hooks.
 pub(crate) fn cleanup_battle(
     mut commands: Commands,
     battle: Option<Res<Battle>>,
