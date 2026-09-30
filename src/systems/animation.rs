@@ -74,27 +74,6 @@ impl CharacterAnimator {
         )
     }
 
-    /// The model root while the driver has not revealed it yet; the
-    /// resolver's hide stays until the first driven step. The inverse
-    /// (`revealed_root`) is unused today: the resume path restores the
-    /// whole subtree and only skips these.
-    #[allow(dead_code)]
-    pub(crate) fn revealed_root(&self) -> Option<Entity> {
-        if self.appeared {
-            self.root
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn unrevealed_root(&self) -> Option<Entity> {
-        if self.appeared {
-            None
-        } else {
-            self.root
-        }
-    }
-
     #[cfg(debug_assertions)]
     pub(crate) fn debug_root(&self) -> Option<Entity> {
         self.root
@@ -446,20 +425,22 @@ pub(crate) fn run_character_animations(
         // first driven step applied a pose or gait, or the actor's
         // script has ticked (a closed chest has nothing to animate but
         // must be seen). Until then the model stays hidden so a
-        // re-entered scene never flashes its bind pose. The visible
-        // re-assert heals the race where the resolver's own hide lands
-        // after a reveal from an earlier tick.
+        // re-entered scene never flashes its bind pose. The re-assert
+        // heals the race where the resolver's own hide lands after a
+        // reveal from an earlier tick. Managed roots are always
+        // Inherited when shown — never Visible, which would override a
+        // hidden ancestor and punch through context hides.
         if let Some(root) = animator.root {
             let revealed = if animator.appeared {
-                model_visibilities.get(root) == Ok(&Visibility::Visible)
+                model_visibilities.get(root) == Ok(&Visibility::Inherited)
             } else if ticked.is_some() || !matches!(step, Step::None | Step::HoldEmote) {
                 animator.appeared = true;
                 true
             } else {
                 false
             };
-            if revealed && model_visibilities.get(root) != Ok(&Visibility::Visible) {
-                commands.entity(root).insert(Visibility::Visible);
+            if revealed && model_visibilities.get(root) != Ok(&Visibility::Inherited) {
+                commands.entity(root).insert(Visibility::Inherited);
             }
         }
     }
@@ -889,8 +870,8 @@ mod tests {
         let model_root = animator.root.unwrap();
         assert_eq!(
             world.get::<Visibility>(model_root).copied(),
-            Some(Visibility::Visible),
-            "the idle gait reveals a battle participant"
+            Some(Visibility::Inherited),
+            "the idle gait reveals a battle participant (deferring to ancestors)",
         );
     }
 
@@ -1001,7 +982,8 @@ mod tests {
         assert!(animator.appeared, "the pose revealed the model");
         assert_eq!(
             world.get::<Visibility>(model_root).copied(),
-            Some(Visibility::Visible),
+            Some(Visibility::Inherited),
+            "the reveal defers to ancestors instead of overriding them",
         );
         let animation = world
             .get::<AnimationPlayer>(player)

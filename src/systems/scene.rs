@@ -362,74 +362,36 @@ pub(crate) fn setup_graphics(mut commands: Commands) {
     crate::battle::setup_graphics(&mut commands);
 }
 
-/// `OnEnter(Battle)`: the scene steps aside — the graphics root, its
-/// direct children (ground, actors, player), and the actors' model
-/// roots each get their own hide. That last level matters: a model
-/// subtree that re-spawned while its ancestors were already hidden
-/// keeps a stale-visible inherited state, so every folded branch gets
-/// a change to propagate from. The background camera stops
-/// compositing.
+/// `OnEnter(Battle)`: the scene steps aside — one toggle on the scene
+/// graphics root folds the background, ground, actors, and player away
+/// while the arena has the screen, and the background camera stops
+/// compositing. Every managed model root defers to its ancestors
+/// (`Inherited` when revealed, `Hidden` before the first driven step),
+/// so a parent toggle is the whole suspension.
 pub(crate) fn suspend_scene(
     mut commands: Commands,
     graphics: Res<SceneGraphics>,
-    children: Query<&Children>,
     mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
 ) {
     commands.entity(graphics.0).insert(Visibility::Hidden);
-    if let Ok(direct) = children.get(graphics.0) {
-        let mut to_hide: Vec<Entity> = Vec::new();
-        for child in direct.iter() {
-            to_hide.push(child);
-            if let Ok(grandchildren) = children.get(child) {
-                for grandchild in grandchildren.iter() {
-                    to_hide.push(grandchild);
-                }
-            }
-        }
-        for entity in to_hide {
-            commands.entity(entity).insert(Visibility::Hidden);
-        }
-    }
     for mut camera in &mut bg_cameras {
         camera.is_active = false;
     }
 }
 
-    /// `OnEnter(Scene)`: fires at the transition's covered point — the
-    /// scene comes back exactly as it was. Model roots whose driver has
-    /// not revealed them yet keep the resolver's hide.
+/// `OnEnter(Scene)`: fires at the transition's covered point — the
+/// scene comes back exactly as it was.
 pub(crate) fn resume_scene(
     mut commands: Commands,
     // The init state transition fires OnEnter(Scene) before Startup has
     // run, so the graphics root may not exist yet; the hook no-ops.
     graphics: Option<Res<SceneGraphics>>,
-    children: Query<&Children>,
-    animators: Query<&crate::systems::animation::CharacterAnimator>,
     mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
 ) {
     let Some(graphics) = graphics else {
         return;
     };
     commands.entity(graphics.0).insert(Visibility::Visible);
-    let held: std::collections::BTreeSet<Entity> = animators
-        .iter()
-        .filter_map(|a| a.unrevealed_root())
-        .collect();
-    if let Ok(direct) = children.get(graphics.0) {
-        let direct: &Children = direct;
-        for child in direct {
-            commands.entity(*child).insert(Visibility::Inherited);
-            if let Ok(grandchildren) = children.get(*child) {
-                for grandchild in grandchildren {
-                    if !held.contains(grandchild) {
-                        commands
-                            .entity(*grandchild)
-                            .insert(Visibility::Inherited);
-                    }
-                }
-            }
-        }
-    }
     for mut camera in &mut bg_cameras {
         camera.is_active = true;
     }
