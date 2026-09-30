@@ -49,14 +49,18 @@ pub(crate) struct CharacterAnimations {
 /// plus the one-shot emote and held pose currently selected. `root` is
 /// the spawned model's top entity, kept hidden until the character's
 /// first driven step so a re-entered scene never flashes its bind pose
-/// (`appeared` latches the unhide).
-#[derive(Component, Default)]
+/// (`appeared` latches the unhide). `model` is the glTF the wiring came
+/// from, so a broken wiring can be rebuilt (a scene instance can be
+/// re-spawned after the resolver ran, taking its AnimationPlayer with
+/// it).
+#[derive(Component)]
 pub(crate) struct CharacterAnimator {
     player: Option<Entity>,
     emote: Option<AnimationNodeIndex>,
     pose: Option<AnimationNodeIndex>,
     root: Option<Entity>,
     appeared: bool,
+    model: Handle<Gltf>,
 }
 
 #[cfg(debug_assertions)]
@@ -68,6 +72,27 @@ impl CharacterAnimator {
             self.emote.map(|i| i.index()),
             self.pose.map(|i| i.index())
         )
+    }
+
+    /// The model root while the driver has not revealed it yet; the
+    /// resolver's hide stays until the first driven step. The inverse
+    /// (`revealed_root`) is unused today: the resume path restores the
+    /// whole subtree and only skips these.
+    #[allow(dead_code)]
+    pub(crate) fn revealed_root(&self) -> Option<Entity> {
+        if self.appeared {
+            self.root
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn unrevealed_root(&self) -> Option<Entity> {
+        if self.appeared {
+            None
+        } else {
+            self.root
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -253,13 +278,16 @@ pub(crate) fn resolve_pending_animations(
         // first driven step (or the actor's first script tick), so a
         // returning chest is seen open rather than flashing closed.
         commands.entity(entity).insert((
-            CharacterAnimations { clips },
+            CharacterAnimations {
+                clips: clips.clone(),
+            },
             CharacterAnimator {
                 player: Some(player),
                 emote: None,
                 pose: None,
                 root: model_root,
                 appeared: false,
+                model: pending.0.clone(),
             },
         ));
         if let Some(root) = model_root {
@@ -335,11 +363,20 @@ pub(crate) fn run_character_animations(
         };
         let Ok((mut player, mut transitions)) = transitions.get_mut(player_entity) else {
             if !animator.appeared {
+                // The model's scene instance can be re-spawned after the
+                // resolver wired it (the instance's AnimationPlayer goes
+                // with it): re-queue the whole wiring against the live
+                // hierarchy instead of staying invisible forever.
                 warn!(
-                    "driver {:?}: player {:?} missing player/transitions components",
+                    "driver {:?}: animation player {:?} is gone; re-queuing the wiring",
                     entity.index(),
                     player_entity.index()
                 );
+                let model = animator.model.clone();
+                commands
+                    .entity(entity)
+                    .remove::<(CharacterAnimations, CharacterAnimator)>()
+                    .insert(PendingAnimations(model));
             }
             continue;
         };

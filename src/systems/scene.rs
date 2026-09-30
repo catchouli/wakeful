@@ -133,6 +133,7 @@ pub fn apply_scene(
     ui: Res<UiApi>,
     state: Res<WorldState>,
     battle: Res<crate::battle::BattleHandle>,
+    graphics: Res<SceneGraphics>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: GameCameraQuery,
@@ -175,7 +176,7 @@ pub fn apply_scene(
     ));
 
     if let Some(path) = &scene.background {
-        spawn_background(&mut commands, &assets, path);
+        spawn_background(&mut commands, &assets, path, &graphics);
     }
 
     // Every scene application starts a fresh player at the scene's chosen
@@ -190,13 +191,16 @@ pub fn apply_scene(
             transform.translation = Vec3::new(at.x, player::PLAYER_Y, at.y);
             transform.rotation = facing_rotation(scene.camera_forward());
         }
-        Err(_) => player::spawn_player(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            at,
-            scene.camera_forward(),
-        ),
+        Err(_) => {
+            let player = player::spawn_player(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                at,
+                scene.camera_forward(),
+            );
+            commands.entity(graphics.0).add_child(player);
+        }
     }
     commands.remove_resource::<PlayerSpawn>();
 
@@ -219,6 +223,7 @@ pub fn apply_scene(
         scene.camera_forward(),
         scene_path,
         &env,
+        &graphics,
     );
 
     // The scene's script, if the file declares one; run_scene_scripts
@@ -282,20 +287,28 @@ pub(crate) fn run_scene_scripts(
 
 /// Spawns the scene's background image on its dedicated layer. Also used
 /// by the editor when the background path changes at runtime.
-pub(crate) fn spawn_background(commands: &mut Commands, assets: &AssetServer, path: &str) {
-    commands.spawn((
-        BackgroundSprite,
-        Sprite {
-            image: assets.load(path.to_owned()),
-            // Backgrounds are authored at the virtual resolution.
-            custom_size: Some(Vec2::new(
-                screen::GAME_WIDTH as f32,
-                screen::GAME_HEIGHT as f32,
-            )),
-            ..default()
-        },
-        RenderLayers::layer(BG_LAYER),
-    ));
+pub(crate) fn spawn_background(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    path: &str,
+    graphics: &SceneGraphics,
+) {
+    let sprite = commands
+        .spawn((
+            BackgroundSprite,
+            Sprite {
+                image: assets.load(path.to_owned()),
+                // Backgrounds are authored at the virtual resolution.
+                custom_size: Some(Vec2::new(
+                    screen::GAME_WIDTH as f32,
+                    screen::GAME_HEIGHT as f32,
+                )),
+                ..default()
+            },
+            RenderLayers::layer(BG_LAYER),
+        ))
+        .id();
+    commands.entity(graphics.0).add_child(sprite);
 }
 
 /// Strips a `#SceneN` sub-asset suffix from a character-model path: the
@@ -330,21 +343,52 @@ pub fn sync_ground(
     };
 }
 
-/// `OnEnter(Battle)`: the scene steps aside — background, actors, and
-/// ground go dark while the arena has the screen, and the background
-/// camera stops compositing. Every root carries Visibility, so one
-/// hidden component folds each whole subtree away.
-/// The scene's battle-suspendable roots: the background photo, every
-/// scene actor, and the placeholder ground.
-type SceneSuspendBits = Or<(With<BackgroundSprite>, With<Actor>, With<Ground>)>;
+/// Root of every scene-context graphic: the background photo, the
+/// ground, the scene actors, and the field player. A battle folds the
+/// whole tree away with one visibility toggle instead of walking
+/// per-entity roots — per-entity suspend/resume churn is what let
+/// hidden subtrees leak back into view.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct SceneGraphics(pub(crate) Entity);
 
+/// Spawns the two context roots once at boot: scene graphics and (over
+/// in battle.rs) battle graphics. Nothing else ever re-parents under
+/// them.
+pub(crate) fn setup_graphics(mut commands: Commands) {
+    let scene = commands
+        .spawn((Name::new("scene graphics"), Visibility::default(), Transform::IDENTITY))
+        .id();
+    commands.insert_resource(SceneGraphics(scene));
+    crate::battle::setup_graphics(&mut commands);
+}
+
+/// `OnEnter(Battle)`: the scene steps aside — the graphics root, its
+/// direct children (ground, actors, player), and the actors' model
+/// roots each get their own hide. That last level matters: a model
+/// subtree that re-spawned while its ancestors were already hidden
+/// keeps a stale-visible inherited state, so every folded branch gets
+/// a change to propagate from. The background camera stops
+/// compositing.
 pub(crate) fn suspend_scene(
     mut commands: Commands,
+    graphics: Res<SceneGraphics>,
+    children: Query<&Children>,
     mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
-    scene_entities: Query<Entity, SceneSuspendBits>,
 ) {
-    for entity in &scene_entities {
-        commands.entity(entity).insert(Visibility::Hidden);
+    commands.entity(graphics.0).insert(Visibility::Hidden);
+    if let Ok(direct) = children.get(graphics.0) {
+        let mut to_hide: Vec<Entity> = Vec::new();
+        for child in direct.iter() {
+            to_hide.push(child);
+            if let Ok(grandchildren) = children.get(child) {
+                for grandchild in grandchildren.iter() {
+                    to_hide.push(grandchild);
+                }
+            }
+        }
+        for entity in to_hide {
+            commands.entity(entity).insert(Visibility::Hidden);
+        }
     }
     for mut camera in &mut bg_cameras {
         camera.is_active = false;
@@ -352,19 +396,45 @@ pub(crate) fn suspend_scene(
 }
 
     /// `OnEnter(Scene)`: fires at the transition's covered point — the
-    /// scene comes back exactly as it was.
+    /// scene comes back exactly as it was. Model roots whose driver has
+    /// not revealed them yet keep the resolver's hide.
 pub(crate) fn resume_scene(
     mut commands: Commands,
+    // The init state transition fires OnEnter(Scene) before Startup has
+    // run, so the graphics root may not exist yet; the hook no-ops.
+    graphics: Option<Res<SceneGraphics>>,
+    children: Query<&Children>,
+    animators: Query<&crate::systems::animation::CharacterAnimator>,
     mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
-    scene_entities: Query<Entity, SceneSuspendBits>,
 ) {
-    for entity in &scene_entities {
-        commands.entity(entity).insert(Visibility::Visible);
+    let Some(graphics) = graphics else {
+        return;
+    };
+    commands.entity(graphics.0).insert(Visibility::Visible);
+    let held: std::collections::BTreeSet<Entity> = animators
+        .iter()
+        .filter_map(|a| a.unrevealed_root())
+        .collect();
+    if let Ok(direct) = children.get(graphics.0) {
+        let direct: &Children = direct;
+        for child in direct {
+            commands.entity(*child).insert(Visibility::Inherited);
+            if let Ok(grandchildren) = children.get(*child) {
+                for grandchild in grandchildren {
+                    if !held.contains(grandchild) {
+                        commands
+                            .entity(*grandchild)
+                            .insert(Visibility::Inherited);
+                    }
+                }
+            }
+        }
     }
     for mut camera in &mut bg_cameras {
         camera.is_active = true;
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -537,6 +607,8 @@ mod tests {
         world.insert_resource(crate::systems::party::Party::default());
         world.insert_resource(crate::world_state::WorldState::default());
         world.insert_resource(crate::battle::BattleHandle::new());
+        let graphics = SceneGraphics(world.spawn_empty().id());
+        world.insert_resource(graphics);
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);

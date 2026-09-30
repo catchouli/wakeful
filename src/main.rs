@@ -151,8 +151,9 @@ fn main() {
     .init_resource::<ui::UiPause>()
     .init_resource::<crate::input::InjectedInputs>()
     .insert_resource(party::Party::default())
-    .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
-    .add_systems(
+    .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ));
+
+    app.add_systems(
         Startup,
         (
             screen::setup_screen,
@@ -162,6 +163,8 @@ fn main() {
             bubble::setup,
             ui::setup,
             transition::setup,
+            // The context roots exist before anything spawns into them.
+            scene_loader::setup_graphics,
             world::spawn_world,
             world_script::startup,
             scene_loader::load_scene,

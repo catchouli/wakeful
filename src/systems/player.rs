@@ -35,7 +35,7 @@ pub(crate) fn spawn_player(
     materials: &mut Assets<StandardMaterial>,
     at: Vec2,
     toward: Vec2,
-) {
+) -> Entity {
     let player = commands
         .spawn((
             Player,
@@ -45,6 +45,7 @@ pub(crate) fn spawn_player(
         ))
         .id();
     spawn_placeholder_body(commands, player, meshes, materials);
+    player
 }
 
 /// Spawns the placeholder cone under `player`, pitched along its +Z

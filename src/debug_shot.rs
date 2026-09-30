@@ -73,9 +73,14 @@ pub(crate) struct RenderDumpParams<'w, 's> {
             &'static Mesh3d,
             &'static Visibility,
             &'static InheritedVisibility,
+            Option<&'static ChildOf>,
         ),
     >,
+    visibilities: Query<'w, 's, &'static Visibility>,
     actormodels: Query<'w, 's, &'static crate::systems::actor::ActorModel>,
+    anim_players: Query<'w, 's, (), With<bevy::animation::prelude::AnimationPlayer>>,
+    graph_handles: Query<'w, 's, &'static bevy::animation::prelude::AnimationGraphHandle>,
+    anim_transitions: Query<'w, 's, &'static bevy::animation::prelude::AnimationTransitions>,
     actors: Query<
         'w,
         's,
@@ -152,13 +157,17 @@ pub fn check_requests<'w, 's>(
             let mut mesh_spots: Vec<String> = render
                 .meshes
                 .iter()
-                .filter(|(t, _, _, _)| t.translation().y < 15.0)
-                .map(|(t, _, v, iv)| {
+                .filter(|(t, _, _, _, _)| t.translation().y < 15.0)
+                .map(|(t, _, v, iv, parent)| {
                     format!(
-                        "{:.1} v={} iv={}",
+                        "{:.1} v={} iv={} parent={:?} pvis={:?}",
                         t.translation(),
                         *v == Visibility::Visible,
-                        iv.get()
+                        iv.get(),
+                        parent.map(|c| c.parent().index()),
+                        parent
+                            .and_then(|c| render.visibilities.get(c.parent()).ok())
+                            .is_some_and(|p| *p == Visibility::Visible),
                     )
                 })
                 .collect();
@@ -224,6 +233,16 @@ pub fn check_requests<'w, 's>(
                     animations.debug_clips(),
                     animator.debug()
                 ));
+                if let Some(player_entity) = animator.debug_player() {
+                    lines.push(format!(
+                        "  player {:?}: alive={} anim_player={} graph={} transitions={}",
+                        player_entity.index(),
+                        entities.contains(player_entity),
+                        render.anim_players.contains(player_entity),
+                        render.graph_handles.contains(player_entity),
+                        render.anim_transitions.contains(player_entity),
+                    ));
+                }
                 if let Some(root) = animator.debug_root() {
                     let scene_root = childrens
                         .get(root)

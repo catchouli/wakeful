@@ -17,7 +17,6 @@ use rhai::{Dynamic, Engine, Scope};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::Player;
 use crate::game_state::GameState;
 use crate::input::InputManager;
 use crate::transition::{Effect, TransitionState};
@@ -28,11 +27,6 @@ use crate::world_state::WorldState;
 use crate::systems::actor::ActorModel;
 use crate::systems::animation::EmoteRequest;
 use crate::systems::ui::{UiApi, UiRequest};
-
-/// The generated arena's height (tools/generate_arena.py). The arena
-/// cube sits centered on its node, so staging lifts it by half: its
-/// floor lands on the origin and the fight happens at field level.
-const ARENA_HEIGHT: f32 = 10.0;
 
 // ---------------------------------------------------------------- script state
 
@@ -62,9 +56,6 @@ pub(crate) struct ActionHandler {
 #[derive(Clone)]
 pub(crate) struct ParticipantDef {
     pub(crate) id: String,
-    /// This participant IS the field player: no model is staged; the
-    /// player entity moves to the formation slot and fights from there.
-    pub(crate) player: bool,
     pub(crate) model: String,
     pub(crate) position: Vec3,
     pub(crate) facing_degrees: f32,
@@ -264,6 +255,23 @@ pub(crate) fn project_to_screen(point: Vec3, camera: &CameraSnapshot) -> (Vec2, 
 
 // ---------------------------------------------------------------- engine state
 
+/// Root of every battle-context graphic: the arena and the fighters.
+/// Staging spawns under it and unhides it; cleanup despawns its content
+/// and hides it — the scene never bleeds into the fight.
+#[derive(Resource)]
+pub(crate) struct BattleGraphics(pub(crate) Entity);
+
+pub(crate) fn setup_graphics(commands: &mut Commands) {
+    let battle = commands
+        .spawn((
+            Name::new("battle graphics"),
+            Visibility::Hidden,
+            Transform::IDENTITY,
+        ))
+        .id();
+    commands.insert_resource(BattleGraphics(battle));
+}
+
 /// One staged combatant on the engine side.
 pub(crate) struct Combatant {
     pub(crate) id: String,
@@ -285,10 +293,6 @@ pub(crate) struct Battle {
     /// Action handlers by name.
     pub(crate) actions: BTreeMap<String, ActionHandler>,
     pub(crate) result: Option<String>,
-    /// The field player's pose before the battle, restored on return.
-    pub(crate) player_return: Option<(Vec3, Quat)>,
-    /// The player participant's entity (the field player itself).
-    pub(crate) player_entity: Option<Entity>,
 }
 
 impl Battle {
@@ -345,10 +349,6 @@ pub(crate) fn register_battle_api(
                         .ok_or_else(|| {
                             runtime_error("start_battle: participant needs id".into())
                         })?;
-                    let player = map
-                        .get("player")
-                        .and_then(|v| v.as_bool().ok())
-                        .unwrap_or(false);
                     let model = map
                         .get("model")
                         .and_then(|v| v.clone().into_string().ok())
@@ -369,7 +369,6 @@ pub(crate) fn register_battle_api(
                         .unwrap_or_default();
                     defs.push(ParticipantDef {
                         id,
-                        player,
                         model,
                         position,
                         facing_degrees: facing,
@@ -557,11 +556,6 @@ pub(crate) fn camera_from_look(position: Vec3, look: Vec3) -> (Vec3, Vec2) {
 // ---------------------------------------------------------------- engine systems
 
 /// Everything the battle systems need, gathered once.
-/// The field player, disjoint from the battle camera (both want
-/// `Transform`).
-type PlayerTransforms<'w, 's> =
-    Query<'w, 's, (Entity, &'static mut Transform), (With<Player>, Without<BattleCamera>)>;
-
 #[allow(clippy::type_complexity)]
 #[derive(SystemParam)]
 pub(crate) struct BattleTurnParams<'w, 's> {
@@ -674,19 +668,19 @@ pub(crate) fn battle_turns(mut params: BattleTurnParams) {
     }
 }
 
-/// Spawns the arena, the participants, and the fade logic; stores the
-/// field camera for the return trip.
 /// `OnEnter(Battle)` staging: builds the arena and the participants
-/// from the pending start, wires brains (files + the inline ones the
-/// battle script registered), and captures the field camera for the
-/// return trip.
+/// from the pending start — the hero is a fresh entity, exactly like
+/// the enemies; nothing carries over from the scene — wires brains
+/// (files + the inline ones the battle script registered), and poses
+/// the camera. Everything stages under [`BattleGraphics`], behind the
+/// opaque transition cover.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn stage_battle<'w, 's>(
+pub(crate) fn stage_battle(
     mut commands: Commands,
     mut pending: ResMut<PendingBattleStart>,
     handle: ResMut<BattleHandle>,
     assets: Res<AssetServer>,
-    mut players: PlayerTransforms<'w, 's>,
+    graphics: Res<BattleGraphics>,
     mut camera: Query<&'static mut Transform, With<BattleCamera>>,
     input: Res<InputManager>,
     ui: Res<UiApi>,
@@ -696,15 +690,17 @@ pub(crate) fn stage_battle<'w, 's>(
         warn!("entered Battle without a pending start");
         return;
     };
-    // The cube is centered on its node; lift it so its floor lands on
-    // the origin height.
+    // The room's floor sits at the model's local origin
+    // (tools/generate_arena.py), so the arena spawns unlifted and the
+    // fighters stand on it.
     let arena = commands
         .spawn((
             ActorModel(assets.load(&def.arena)),
             Visibility::default(),
-            Transform::from_translation(Vec3::new(0.0, ARENA_HEIGHT / 2.0, 0.0)),
+            Transform::IDENTITY,
         ))
         .id();
+    commands.entity(graphics.0).add_child(arena);
 
     // Brain files compile with the full script environment: a menu
     // brain needs the UI, a coordinated pack needs the battle store.
@@ -715,38 +711,22 @@ pub(crate) fn stage_battle<'w, 's>(
         handle.clone(),
     );
     let mut participants = Vec::new();
-    let mut player_return = None;
     for def in &def.participants {
         let rotation = Quat::from_rotation_y(def.facing_degrees.to_radians());
-        // The player participant IS the field player: the party
-        // leader's model walks into the formation slot, and its whole
-        // animation pipeline just works. Enemies stage exactly like
-        // the arena does.
-        let entity = if def.player {
-            let Ok((entity, mut transform)) = players.single_mut() else {
-                warn!("battle needs the field player; skipping {}", def.id);
-                continue;
-            };
-            player_return = Some((transform.translation, transform.rotation));
-            transform.translation = def.position;
-            transform.rotation = rotation;
-            // Hidden until the frozen frame covers the view swap.
-            commands.entity(entity).insert(Visibility::Hidden);
-            entity
-        } else {
-            let model = def.model.clone();
-            commands
-                .spawn((
-                    BattleParticipant,
-                    Locomotion::default(),
-                    ActorModel(assets.load(&model)),
-                    // Hidden until the frozen frame covers the view
-                    // swap: the fighters take the stage behind it.
-                    Visibility::Hidden,
-                    Transform::from_translation(def.position).with_rotation(rotation),
-                ))
-                .id()
-        };
+        // The hero stages like any other participant: a fresh model at
+        // the formation slot, spawned visible — staging fires behind
+        // the opaque transition cover, and the resolver's reveal owns
+        // the model root's visibility from there.
+        let entity = commands
+            .spawn((
+                BattleParticipant,
+                Locomotion::default(),
+                ActorModel(assets.load(&def.model)),
+                Visibility::default(),
+                Transform::from_translation(def.position).with_rotation(rotation),
+            ))
+            .id();
+        commands.entity(graphics.0).add_child(entity);
         let mut brain = None;
         if let Some(path) = &def.brain {
             brain = crate::scripts::ActorScript::load(path, env.clone().with_store(path))
@@ -761,17 +741,6 @@ pub(crate) fn stage_battle<'w, 's>(
             brain,
         });
     }
-    // The player combatant, for the return trip.
-    let player_entity = participants
-        .iter()
-        .find(|c| {
-            c.entity
-                == players
-                    .single()
-                    .map(|(e, _)| e)
-                    .unwrap_or(Entity::PLACEHOLDER)
-        })
-        .map(|c| c.entity);
     // The battle camera takes the script's pose; the scene camera is
     // never touched, so there is nothing to restore on the way out.
     // glam's YXZ angles arrive in axis order: yaw (Y) first, pitch (X)
@@ -800,11 +769,9 @@ pub(crate) fn stage_battle<'w, 's>(
         participants,
         actions: std::mem::take(&mut pending.actions),
         result: None,
-        player_entity,
-        player_return,
     });
+    commands.entity(graphics.0).insert(Visibility::Visible);
 }
-
 /// `OnEnter(Scene)`: fires at the transition's covered point — the
 /// arena and the fighters go, and the scene modules restore themselves
 /// in their own hooks.
@@ -813,6 +780,8 @@ pub(crate) fn cleanup_battle(
     battle: Option<Res<Battle>>,
     handle: ResMut<BattleHandle>,
     ui: Res<UiApi>,
+    // Fires once at boot (before Startup) with no root to fold.
+    graphics: Option<Res<BattleGraphics>>,
 ) {
     let Some(battle) = battle else {
         return;
@@ -831,20 +800,15 @@ pub(crate) fn cleanup_battle(
         });
     }
     for combatant in &battle.participants {
-        if Some(combatant.entity) == battle.player_entity {
-            if let Some((translation, rotation)) = battle.player_return {
-                commands
-                    .entity(combatant.entity)
-                    .insert(Transform::from_translation(translation).with_rotation(rotation));
-            }
-        } else {
-            commands.entity(combatant.entity).despawn();
-        }
+        commands.entity(combatant.entity).despawn();
     }
     commands.entity(battle.arena).despawn();
     commands.remove_resource::<Battle>();
     handle.set_active(false);
     handle.clear_store();
+    if let Some(graphics) = graphics {
+        commands.entity(graphics.0).insert(Visibility::Hidden);
+    }
 }
 
 /// One running-battle tick: publish state for scripts, find who acts,
@@ -1020,8 +984,6 @@ mod tests {
             ],
             actions: BTreeMap::new(),
             result: None,
-            player_entity: None,
-            player_return: None,
         };
         assert_eq!(
             battle
@@ -1166,8 +1128,6 @@ mod tests {
             participants: vec![],
             actions: BTreeMap::new(),
             result: None,
-            player_return: None,
-            player_entity: None,
         });
         world
             .resource_mut::<BattleHandle>()
@@ -1183,5 +1143,77 @@ mod tests {
         let (yaw_before, _, _) = idle.rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - yaw_before - 0.5).abs() < 1e-4);
         assert!((flown.translation - idle.translation).length() - 1.0 < 1e-4);
+    }
+
+    #[test]
+    fn staging_leaves_the_fighters_visible_and_on_the_floor() {
+        use bevy::asset::AssetPlugin;
+        use bevy::ecs::system::RunSystemOnce;
+
+        // Staging fires at the transition's covered point, behind the
+        // opaque cover: nothing in staging may hide the fighters, and
+        // the arena floor sits at world zero (the generator's floor is
+        // its local origin), so the fighters stand on it. The hero
+        // stages as a fresh entity, exactly like the enemies.
+        let mut app = App::new();
+        bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        app.add_plugins(AssetPlugin::default());
+        app.init_asset::<bevy::gltf::Gltf>();
+        let world = app.world_mut();
+        world.init_resource::<BattleHandle>();
+        crate::battle::setup_graphics(&mut world.commands());
+        world.flush();
+        let graphics = world.resource::<BattleGraphics>().0;
+        world.insert_resource(PendingBattleStart {
+            def: Some(StartBattle {
+                arena: "models/arena.glb".into(),
+                camera_pos: Vec3::new(10.0, 9.0, 10.0),
+                camera_look: Vec3::new(0.0, 0.5, 0.0),
+                participants: vec![
+                    ParticipantDef {
+                        id: "hero".into(),
+                        model: "models/character.glb".into(),
+                        position: Vec3::new(0.0, 0.0, 3.0),
+                        facing_degrees: 180.0,
+                        brain: None,
+                        time_until_act: 0.0,
+                        bag: rhai::Map::new(),
+                    },
+                    ParticipantDef {
+                        id: "goblin".into(),
+                        model: "models/goblin.glb".into(),
+                        position: Vec3::new(0.0, 0.0, -3.0),
+                        facing_degrees: 0.0,
+                        brain: None,
+                        time_until_act: 0.0,
+                        bag: rhai::Map::new(),
+                    },
+                ],
+            }),
+            ..default()
+        });
+        world.spawn((BattleCamera, Transform::IDENTITY, Projection::default()));
+        world.insert_resource(InputManager::standard());
+        world.insert_resource(UiApi::new());
+        world.init_resource::<WorldState>();
+
+        world.run_system_once(stage_battle).unwrap();
+        world.flush();
+
+        let mut fighters = world.query_filtered::<&Visibility, With<BattleParticipant>>();
+        assert_eq!(fighters.iter(world).count(), 2, "the hero stages fresh");
+        for visibility in fighters.iter(world) {
+            assert_ne!(*visibility, Visibility::Hidden);
+        }
+        let mut arenas = world.query_filtered::<&Transform, (With<ActorModel>, Without<BattleParticipant>)>();
+        let arena = arenas
+            .single(world)
+            .expect("the arena staged");
+        assert_eq!(*arena, Transform::IDENTITY, "the floor is at zero");
+        let mut children = world.query::<&ChildOf>();
+        assert!(
+            children.iter(world).all(|child| child.parent() == graphics),
+            "everything staged under the battle graphics root"
+        );
     }
 }

@@ -42,7 +42,11 @@ pub fn setup_game_camera(mut commands: Commands, game_image: Res<GameImage>) {
         Camera3d::default(),
         Camera {
             order: 1,
-            clear_color: ClearColorConfig::None,
+            // The battle owns the whole image: nothing composites under
+            // it (the background camera is suspended), so the pass must
+            // clear — an uncleared frame smears the fighters and ghosts
+            // the last scene across the arena's culled walls.
+            clear_color: ClearColorConfig::Default,
             is_active: false,
             ..default()
         },

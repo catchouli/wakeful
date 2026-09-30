@@ -76,6 +76,7 @@ pub(crate) fn spawn_actors(
     toward: Vec2,
     scene_path: &str,
     env: &crate::scripts::ScriptEnv,
+    graphics: &crate::systems::scene::SceneGraphics,
 ) {
     for actor in &scene.actors {
         // Storage identity: game-wide id when set (shared across
@@ -100,27 +101,30 @@ pub(crate) fn spawn_actors(
                 script,
                 scope: Scope::new(),
             });
-        commands.spawn((
-            Actor {
-                script,
-                bubble: None,
-                said: None,
-            },
-            Visibility::default(),
-            Locomotion::default(),
-            // No script to tick: the driver's reveal marker would
-            // never land, so show script-less models from the start.
-            ScriptTicked,
-            ActorModel(assets.load(gltf_asset_path(&actor.model))),
-            // A pinned facing turns the model to a world yaw; otherwise
-            // the actor looks the way the scene camera looks.
-            Transform::from_xyz(actor.position[0], 0.0, actor.position[1]).with_rotation(
-                match actor.facing {
-                    Some(degrees) => Quat::from_rotation_y(degrees.to_radians()),
-                    None => facing_rotation(toward),
+        let entity = commands
+            .spawn((
+                Actor {
+                    script,
+                    bubble: None,
+                    said: None,
                 },
-            ),
-        ));
+                Visibility::default(),
+                Locomotion::default(),
+                // No script to tick: the driver's reveal marker would
+                // never land, so show script-less models from the start.
+                ScriptTicked,
+                ActorModel(assets.load(gltf_asset_path(&actor.model))),
+                // A pinned facing turns the model to a world yaw; otherwise
+                // the actor looks the way the scene camera looks.
+                Transform::from_xyz(actor.position[0], 0.0, actor.position[1]).with_rotation(
+                    match actor.facing {
+                        Some(degrees) => Quat::from_rotation_y(degrees.to_radians()),
+                        None => facing_rotation(toward),
+                    },
+                ),
+            ))
+            .id();
+        commands.entity(graphics.0).add_child(entity);
     }
 }
 
@@ -443,6 +447,8 @@ mod tests {
             }],
         };
         let server = world.resource::<AssetServer>().clone();
+        let graphics = crate::systems::scene::SceneGraphics(world.spawn_empty().id());
+        world.insert_resource(graphics);
         let mut commands = world.commands();
         let env = crate::scripts::ScriptEnv::detached();
         spawn_actors(
@@ -452,6 +458,7 @@ mod tests {
             Vec2::NEG_Y,
             "scenes/test.scene",
             &env,
+            &graphics,
         );
         world.flush();
 
@@ -494,6 +501,8 @@ mod tests {
             }],
         };
         let server = world.resource::<AssetServer>().clone();
+        let graphics = crate::systems::scene::SceneGraphics(world.spawn_empty().id());
+        world.insert_resource(graphics);
         let mut commands = world.commands();
         let env = crate::scripts::ScriptEnv::detached();
         spawn_actors(
@@ -503,6 +512,7 @@ mod tests {
             Vec2::NEG_Y,
             "scenes/test.scene",
             &env,
+            &graphics,
         );
         world.flush();
 
