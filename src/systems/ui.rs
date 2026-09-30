@@ -441,13 +441,6 @@ pub(crate) fn drain(
     let mut closes: BTreeSet<String> = BTreeSet::new();
     let mut pending: BTreeMap<String, Pending> = BTreeMap::new();
     let mut warned = BTreeSet::new();
-    bevy::log::info!(
-        "ui drain: current windows {:?}",
-        windows
-            .iter()
-            .map(|(_, w)| w.name.clone())
-            .collect::<Vec<_>>()
-    );
     for request in requests {
         match request {
             UiRequest::Pause(value) => pause.0 = value,

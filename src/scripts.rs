@@ -1549,4 +1549,47 @@ mod tests {
         assert_eq!(scope.get_value::<i64>("rich"), Some(60));
         assert_eq!(scope.get_value::<bool>("missing"), Some(true));
     }
+
+    #[test]
+    fn the_shipped_battle_camera_script_flies_when_toggled() {
+        use crate::input::PadButton;
+
+        let input = crate::input::detached();
+        let battle = crate::battle::BattleHandle::new();
+        let text = std::fs::read_to_string(
+            crate::assets::assets_root().join("scripts/world/battle_camera.rhai"),
+        )
+        .expect("the shipped camera script is on disk");
+        let script = WorldScript::compile_with_handle(
+            &text,
+            ScriptEnv::new(
+                input.clone(),
+                UiApi::new(),
+                WorldState::default(),
+                battle.clone(),
+            ),
+        )
+        .expect("the shipped camera script compiles");
+        let mut scope = Scope::new();
+
+        // Buttons up: the mode is off and nothing flies.
+        script.update(&mut scope, 0.016).unwrap();
+        assert_eq!(battle.take_requests().len(), 0);
+
+        // Select taps the mode on; a held d-pad looks. The shipped
+        // script also exercises the world tier's registration of
+        // battle_camera_move, so this catches a missing tier.
+        input.lock().unwrap().inject(
+            &[PadButton::Select, PadButton::DPadLeft],
+            &[PadButton::Select],
+            &[],
+        );
+        script.update(&mut scope, 0.016).unwrap();
+        let requests = battle.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            requests[0],
+            crate::battle::BattleRequest::CameraMove { yaw, .. } if yaw > 0.0
+        ));
+    }
 }

@@ -113,6 +113,13 @@ pub(crate) enum BattleRequest {
         participant: String,
         clip: String,
     },
+    /// Free-camera flight deltas: yaw and pitch in radians, dolly in
+    /// world units along the look direction.
+    CameraMove {
+        yaw: f32,
+        pitch: f32,
+        dolly: f32,
+    },
 }
 
 /// A participant as scripts see it: engine fields plus the bag merged
@@ -442,6 +449,20 @@ pub(crate) fn register_battle_api(
             });
         });
     }
+
+    {
+        let battle = battle.clone();
+        engine.register_fn(
+            "battle_camera_move",
+            move |yaw: f64, pitch: f64, dolly: f64| {
+                battle.push(BattleRequest::CameraMove {
+                    yaw: yaw as f32,
+                    pitch: pitch as f32,
+                    dolly: dolly as f32,
+                });
+            },
+        );
+    }
 }
 
 /// Participants as maps for brains and UI: engine fields with the bag
@@ -564,6 +585,7 @@ pub(crate) fn battle_requests(
     mut transition: ResMut<TransitionState>,
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
+    mut cameras: Query<&mut Transform, With<BattleCamera>>,
 ) {
     let mut end: Option<String> = None;
     for request in battle.take_requests() {
@@ -601,6 +623,27 @@ pub(crate) fn battle_requests(
                     && let Some(mut request) = emote_targets.get_mut(c.entity).ok()
                 {
                     request.emote = Some(clip);
+                }
+            }
+            BattleRequest::CameraMove {
+                yaw: dyaw,
+                pitch: dpitch,
+                dolly,
+            } => {
+                // The free-camera flight: rotate, then slide along the
+                // new look direction. The sequencer republishes the
+                // camera snapshot from this transform every tick, so
+                // script projections stay truthful while flying.
+                if battle_state.is_some()
+                    && let Ok(mut transform) = cameras.single_mut()
+                {
+                    let (yaw_now, pitch_now, _) =
+                        transform.rotation.to_euler(EulerRot::YXZ);
+                    let yaw = yaw_now + dyaw;
+                    let pitch = (pitch_now + dpitch).clamp(-1.5, 1.5);
+                    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+                    let slide = transform.forward() * dolly;
+                    transform.translation += slide;
                 }
             }
         }
@@ -731,11 +774,13 @@ pub(crate) fn stage_battle<'w, 's>(
         .map(|c| c.entity);
     // The battle camera takes the script's pose; the scene camera is
     // never touched, so there is nothing to restore on the way out.
+    // glam's YXZ angles arrive in axis order: yaw (Y) first, pitch (X)
+    // second — swapping them points the camera up and sideways.
     if let Ok(mut transform) = camera.single_mut() {
         let (position, yaw_pitch) = camera_from_look(def.camera_pos, def.camera_look);
         transform.translation = position;
         let (yaw, pitch) = (yaw_pitch.x, yaw_pitch.y);
-        transform.rotation = Quat::from_euler(EulerRot::YXZ, pitch, yaw, 0.0);
+        transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
     }
 
     // The store starts clean, then is seeded with the starting bags:
@@ -1078,5 +1123,65 @@ mod tests {
         let participant = participant_map("goblin", Vec3::ZERO, 0.0, &rhai::Map::new());
         let choice = decide_with_brain(&brain, participant).unwrap().unwrap();
         assert_eq!(choice.into_string().unwrap(), "attack");
+    }
+
+    #[test]
+    fn the_camera_flight_moves_the_transform_only_while_a_battle_runs() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.insert_resource(BattleHandle::new());
+        world.init_resource::<crate::transition::TransitionState>();
+        world.init_resource::<NextState<GameState>>();
+        world.init_resource::<PendingBattleStart>();
+        world.spawn((
+            BattleCamera,
+            Transform::from_xyz(10.0, 9.0, 10.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+            Projection::default(),
+        ));
+        let pose = |world: &mut World| {
+            *world
+                .query::<&Transform>()
+                .single(world)
+                .expect("the harness spawns the battle camera")
+        };
+        let original = pose(&mut world);
+
+        // No battle: the request is dropped, the camera stays put.
+        world
+            .resource_mut::<BattleHandle>()
+            .push(BattleRequest::CameraMove {
+                yaw: 0.5,
+                pitch: 0.0,
+                dolly: 1.0,
+            });
+        world.run_system_once(battle_requests).unwrap();
+        let idle = pose(&mut world);
+        assert_eq!(idle, original);
+
+        // A live battle: the flight turns the camera half a radian and
+        // slides it exactly one unit along the (new) look direction.
+        world.insert_resource(Battle {
+            arena: Entity::PLACEHOLDER,
+            participants: vec![],
+            actions: BTreeMap::new(),
+            result: None,
+            player_return: None,
+            player_entity: None,
+        });
+        world
+            .resource_mut::<BattleHandle>()
+            .push(BattleRequest::CameraMove {
+                yaw: 0.5,
+                pitch: 0.0,
+                dolly: 1.0,
+            });
+        world.run_system_once(battle_requests).unwrap();
+        let flown = pose(&mut world);
+
+        let (yaw, _, _) = flown.rotation.to_euler(EulerRot::YXZ);
+        let (yaw_before, _, _) = idle.rotation.to_euler(EulerRot::YXZ);
+        assert!((yaw - yaw_before - 0.5).abs() < 1e-4);
+        assert!((flown.translation - idle.translation).length() - 1.0 < 1e-4);
     }
 }
