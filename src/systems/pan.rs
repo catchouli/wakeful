@@ -11,10 +11,6 @@
 use bevy::prelude::*;
 
 use crate::camera::SceneCamera;
-/// How fast the window catches up to the player, per second: the
-/// fraction of the remaining distance covered each tick. 0.0 means
-/// never moves, ~12 reads as a few-hundred-millisecond glide.
-const FOLLOW_RATE: f32 = 12.0;
 
 /// Where the window's top-left corner should sit so the player is
 /// centered, clamped to the plate. `player_at` is the player's position
@@ -56,12 +52,12 @@ pub(crate) fn player_plate_px(
     ))
 }
 
-/// Slides the window toward the player. Runs every frame the scene is
-/// live; the window's current offset — in the camera's own sub view —
-/// is the whole carried-over state, so scenes without a pan spec (no
-/// sub view) simply never enter the math.
+/// Snaps the window onto the player every frame — no smoothing: the
+/// view rides the player directly and stops crisply at the plate's
+/// edges. Runs every frame the scene is live; the window's offset in
+/// the camera's own sub view is the whole carried-over state, so
+/// scenes without a pan spec (no sub view) never enter the math.
 pub(crate) fn follow_player(
-    time: Res<Time>,
     player: Query<&GlobalTransform, With<crate::Player>>,
     mut camera: Query<(&mut Camera, &Projection, &GlobalTransform), With<SceneCamera>>,
 ) {
@@ -76,7 +72,6 @@ pub(crate) fn follow_player(
     };
     let window = sub.size.as_vec2();
     let plate = sub.full_size.as_vec2();
-    let offset = sub.offset;
     // Project through the FULL plate view in plate pixels — a constant
     // projection that cannot see the window, so the follow math cannot
     // feed back into itself (that made the window hunt and wobble).
@@ -91,10 +86,8 @@ pub(crate) fn follow_player(
         return;
     };
     let target = target_offset(player_at, window, plate);
-    let blend = 1.0 - (-FOLLOW_RATE * time.delta_secs()).exp();
-    let moved = offset.lerp(target, blend);
     if let Some(sub) = camera.sub_camera_view.as_mut() {
-        sub.offset = moved;
+        sub.offset = target;
     }
 }
 
