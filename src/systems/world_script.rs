@@ -35,8 +35,15 @@ pub(crate) fn startup(
     ui: Res<UiApi>,
     state: Res<WorldState>,
     battle: Res<crate::battle::BattleHandle>,
+    world: Res<crate::scripts::WorldCommands>,
 ) {
-    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone(), battle.clone());
+    let env = ScriptEnv::new(
+        input.handle(),
+        ui.clone(),
+        state.clone(),
+        battle.clone(),
+        world.clone(),
+    );
     spawn_world_scripts(&mut commands, &assets_root().join(WORLD_SCRIPTS_DIR), &env);
 }
 
@@ -104,6 +111,7 @@ mod tests {
     use std::sync::PoisonError;
 
     use super::*;
+    use rhai::Dynamic;
 
     /// A fresh temp folder with the given files, removed on drop so a
     /// failed test doesn't leave junk behind.
@@ -148,6 +156,7 @@ mod tests {
             crate::systems::ui::UiApi::new(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         spawn_world_scripts(&mut world.commands(), &dir.0, &env);
         world.flush();
@@ -178,6 +187,7 @@ mod tests {
             crate::systems::ui::UiApi::new(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         spawn_world_scripts(
             &mut world.commands(),
@@ -209,6 +219,7 @@ mod tests {
             api.clone(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         let runtime = WorldScriptRuntime::compile_with_handle(
             include_str!("../../assets/scripts/world/triangle_menu.rhai"),
@@ -248,6 +259,7 @@ mod tests {
             y: 8.0,
             w: 200.0,
             h: 110.0,
+            lift: 0.0,
         }));
 
         // The engine's reconcile declares the options; the script
@@ -271,6 +283,7 @@ mod tests {
             y: 128.0,
             w: 140.0,
             h: 22.0,
+            lift: 0.0,
         }));
 
         // Circle closes everything and unfreezes the field.
@@ -286,6 +299,117 @@ mod tests {
                 .iter()
                 .any(|request| matches!(request, UiRequest::Close { name } if name == "picked"))
         );
+    }
+
+    #[test]
+    fn the_shipped_roster_script_bootstraps_and_levels_up() {
+        // The character-sheet data layer: three ticks settle the store
+        // (defs, roster, sheets), then XP posted by a battle levels the
+        // hero up along the curve and the derived stats follow.
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::systems::party::Party::default());
+        let state = crate::world_state::WorldState::default();
+        world.insert_resource(state.clone());
+        let env = crate::scripts::ScriptEnv::new(
+            crate::input::detached(),
+            crate::systems::ui::UiApi::new(),
+            state.clone(),
+            crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
+        );
+        let runtime = WorldScriptRuntime::compile_with_handle(
+            include_str!("../../assets/scripts/world/roster.rhai"),
+            env,
+        )
+        .expect("the shipped roster script must compile");
+        let script_entity = world
+            .spawn((WorldScript {
+                path: "scripts/world/roster.rhai".into(),
+                runtime,
+                scope: Scope::new(),
+            },))
+            .id();
+
+        world.run_system_once(run_world_scripts).unwrap();
+        assert!(
+            world.get::<ScriptBroken>(script_entity).is_none(),
+            "the roster script must not error on its ticks"
+        );
+        world.run_system_once(run_world_scripts).unwrap();
+        assert!(
+            world.get::<ScriptBroken>(script_entity).is_none(),
+            "the roster script must keep running"
+        );
+
+        let sheet_of = |shared: &crate::world_state::WorldState, id: &str| -> rhai::Map {
+            shared
+                .shared()
+                .lock()
+                .unwrap()
+                .get("sheets")
+                .and_then(|v| v.clone().try_cast::<rhai::Map>())
+                .and_then(|sheets| sheets.get(id).cloned())
+                .and_then(|v| v.try_cast::<rhai::Map>())
+                .expect("the sheet must exist")
+        };
+        let num = |sheet: &rhai::Map, key: &str| -> f64 {
+            sheet
+                .get(key)
+                .and_then(|v| v.as_float().ok())
+                .unwrap()
+        };
+
+        let hero = sheet_of(&state, "hero");
+        assert_eq!(
+            hero.get("level").and_then(|v| v.as_int().ok()),
+            Some(1)
+        );
+        // Base fighter str 10 + the rusty knife's 2.
+        assert!((num(&hero, "str") - 12.0).abs() < 1e-6);
+        assert!((num(&hero, "max_hp") - 60.0).abs() < 1e-6);
+
+        let ember = sheet_of(&state, "ember");
+        assert_eq!(ember.get("spells").is_some(), true, "the mage owns spells");
+
+        // A battle posts 50 xp: level 2 (25 needed) with 25 left over,
+        // and the derived strength picks up the level's growth.
+        let entry = rhai::Map::from_iter([
+            ("id".into(), Dynamic::from("hero")),
+            ("amount".into(), Dynamic::from(50.0_f64)),
+        ]);
+        state
+            .shared()
+            .lock()
+            .unwrap()
+            .insert(
+                "xp_pending".into(),
+                Dynamic::from(vec![Dynamic::from(entry)]),
+            );
+        world.run_system_once(run_world_scripts).unwrap();
+
+        // TEMP: why didn't the level land?
+        {
+            let shared = state.shared();
+            let guard = shared.lock().unwrap();
+            eprintln!(
+                "POST-XP pending = {:?} hero = {:?} broken = {:?}",
+                guard.get("xp_pending"),
+                guard
+                    .get("sheets")
+                    .and_then(|v| v.clone().try_cast::<rhai::Map>())
+                    .and_then(|s| s.get("hero").cloned()),
+                world.get::<ScriptBroken>(script_entity).is_some(),
+            );
+        }
+
+        let hero = sheet_of(&state, "hero");
+        assert_eq!(
+            hero.get("level").and_then(|v| v.as_int().ok()),
+            Some(2)
+        );
+        assert!((num(&hero, "xp") - 25.0).abs() < 1e-6, "leftover xp kept");
+        assert!((num(&hero, "str") - 14.0).abs() < 1e-6, "growth applied");
     }
 
     #[test]
@@ -331,5 +455,41 @@ mod tests {
         assert!(world.get::<ScriptBroken>(entity).is_some());
         // The tick query filters it out from then on.
         world.run_system_once(run_world_scripts).unwrap();
+    }
+}
+
+
+
+/// Drains script scene-operations: `warp_to` rides the teleporter's
+/// covered-point flow (the fade begins now, the scene swaps behind the
+/// cover), `teleport_player` repositions within the current scene.
+/// Both are Scene-only: a battle or a transition absorbs the request.
+pub(crate) fn drain_world_commands(
+    world: Res<crate::scripts::WorldCommands>,
+    state: Res<State<crate::game_state::GameState>>,
+    mut transitions: ResMut<crate::transition::TransitionState>,
+    mut commands: Commands,
+    mut player: Query<&mut Transform, With<crate::Player>>,
+) {
+    for request in world.take() {
+        if *state.get() != crate::game_state::GameState::Scene {
+            warn!("world command {request:?} ignored outside the Scene state");
+            continue;
+        }
+        match request {
+            crate::scripts::WorldRequest::Warp { scene, arrival } => {
+                commands.insert_resource(crate::systems::teleport::PendingSceneWarp {
+                    target: scene,
+                    arrival,
+                });
+                transitions.begin(crate::game_state::GameState::Scene, crate::transition::Effect::Fade);
+            }
+            crate::scripts::WorldRequest::Teleport { position } => {
+                if let Ok(mut transform) = player.single_mut() {
+                    transform.translation.x = position.x;
+                    transform.translation.z = position.y;
+                }
+            }
+        }
     }
 }
