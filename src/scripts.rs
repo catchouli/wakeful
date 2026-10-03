@@ -49,6 +49,7 @@ use bevy::log::warn;
 use bevy::prelude::Component;
 use rhai::{Dynamic, Engine, Map, Position, Scope};
 
+use crate::assets::assets_root;
 use crate::input::{InputCaptures, InputHandle, PadButton};
 use crate::systems::ui::UiApi;
 use crate::world_state::{SharedMap, WorldState};
@@ -100,12 +101,28 @@ pub enum UiRequest {
         y: f32,
         w: f32,
         h: f32,
+        /// World-unit lift toward the camera, for stacked bubbles (the
+        /// command menu sits above the status panel).
+        lift: f32,
     },
     Text {
         window: String,
         text: String,
         x: f32,
         y: f32,
+        /// Override for the theme's text color (white damage numbers
+        /// over dark bars, colored float labels).
+        color: Option<bevy::color::Color>,
+    },
+    /// Bare colored text at an absolute screen position — no bubble,
+    /// no panel: floating damage numbers and the like. Re-issued per
+    /// tick like windows; a label not re-issued disappears.
+    Label {
+        name: String,
+        text: String,
+        x: f32,
+        y: f32,
+        color: [f32; 3],
     },
     Options {
         window: String,
@@ -253,6 +270,15 @@ impl CompiledScript {
         // Script print() lands in the game log — diagnostics live in
         // the same place as everything else.
         engine.on_print(|message| bevy::log::info!("[script] {message}"));
+        // `import "lib/<name>" as x;` resolves shared code under the
+        // scripts root, for every tier (a missing module is a compile
+        // error, so a broken import fails loudly like anything else).
+        let mut modules =
+            rhai::module_resolvers::FileModuleResolver::new_with_path(assets_root().join("scripts"));
+        // Libs re-read on every compile: editing a library lands with
+        // the next scene apply or battle staging, no restart needed.
+        modules.enable_cache(false);
+        engine.set_module_resolver(modules);
         register(&mut engine, &source);
         let ast = engine.compile(text)?;
         *source.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -458,6 +484,21 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 y: y as f32,
                 w: w as f32,
                 h: h as f32,
+                lift: 0.0,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_window_lift",
+        move |name: &str, x: f64, y: f64, w: f64, h: f64, lift: f64| {
+            api.push(UiRequest::Window {
+                name: name.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                w: w as f32,
+                h: h as f32,
+                lift: lift as f32,
             });
         },
     );
@@ -470,6 +511,28 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 text: text.to_owned(),
                 x: x as f32,
                 y: y as f32,
+                color: None,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_text",
+        move |window: &str, text: &str, x: f64, y: f64, color: rhai::Array| {
+            let channel = |v: &rhai::Dynamic| -> f32 {
+                v.clone().try_cast::<f64>().unwrap_or(1.0) as f32
+            };
+            let rgb = [
+                color.first().map(&channel).unwrap_or(1.0),
+                color.get(1).map(&channel).unwrap_or(1.0),
+                color.get(2).map(&channel).unwrap_or(1.0),
+            ];
+            api.push(UiRequest::Text {
+                window: window.to_owned(),
+                text: text.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                color: Some(bevy::color::Color::srgb(rgb[0], rgb[1], rgb[2])),
             });
         },
     );
@@ -499,6 +562,27 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 y: y as f32,
                 w: w as f32,
                 ratio: ratio as f32,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_label",
+        move |name: &str, text: &str, x: f64, y: f64, color: rhai::Array| {
+            let channel = |v: &rhai::Dynamic| -> f32 {
+                v.clone().try_cast::<f64>().unwrap_or(1.0) as f32
+            };
+            let rgb = [
+                color.first().map(&channel).unwrap_or(1.0),
+                color.get(1).map(&channel).unwrap_or(1.0),
+                color.get(2).map(&channel).unwrap_or(1.0),
+            ];
+            api.push(UiRequest::Label {
+                name: name.to_owned(),
+                text: text.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                color: rgb,
             });
         },
     );
@@ -679,6 +763,18 @@ impl ActorScript {
         arg: Dynamic,
     ) -> Result<Dynamic, ScriptError> {
         self.script.call(scope, name, (arg,))
+    }
+
+    /// The two-argument flavor (battle choreographies take the actor
+    /// and a state map).
+    pub fn call_dynamic2(
+        &self,
+        scope: &mut Scope,
+        name: &str,
+        first: Dynamic,
+        second: Dynamic,
+    ) -> Result<Dynamic, ScriptError> {
+        self.script.call(scope, name, (first, second))
     }
 
     /// Runs one `on_update`. The position is `None` when the script (or
