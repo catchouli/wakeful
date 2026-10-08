@@ -30,6 +30,7 @@ const Z_PANEL_BACK: f32 = 0.5;
 const Z_PANEL_FILL: f32 = 0.55;
 /// Bar tracks sit on the panel fill — sharing its Z would z-fight.
 const Z_BAR_TRACK: f32 = 0.6;
+const Z_IMAGE: f32 = 0.7;
 const Z_TEXT: f32 = 0.9;
 const Z_CURSOR: f32 = 0.95;
 
@@ -189,6 +190,8 @@ pub(crate) fn setup(mut commands: Commands, server: Res<AssetServer>) {
 
 /// A script-declared panel. All children (panel quads, text, bars,
 /// cursor) are rebuilt from requests whenever the window is re-declared.
+/// Bare windows render no panel: their children sit at absolute screen
+/// positions (floating labels).
 #[derive(Component, Clone)]
 pub(crate) struct UiWindow {
     name: String,
@@ -196,6 +199,8 @@ pub(crate) struct UiWindow {
     y: f32,
     w: f32,
     h: f32,
+    bare: bool,
+    lift: f32,
 }
 
 /// An options list within a window; `cursor` points at the finger.
@@ -216,13 +221,36 @@ struct Pending {
     y: f32,
     w: f32,
     h: f32,
+    bare: bool,
+    lift: f32,
     content: Vec<Content>,
 }
 
 enum Content {
-    Text { text: String, x: f32, y: f32 },
-    Options { x: f32, y: f32, labels: Vec<String> },
-    Bar { x: f32, y: f32, w: f32, ratio: f32 },
+        Text {
+            text: String,
+            x: f32,
+            y: f32,
+            color: Option<bevy::color::Color>,
+        },
+        Image {
+            path: String,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+        },
+    Options {
+        x: f32,
+        y: f32,
+        labels: Vec<String>,
+    },
+    Bar {
+        x: f32,
+        y: f32,
+        w: f32,
+        ratio: f32,
+    },
 }
 
 /// Window-local pixel position (y down) to a child transform offset
@@ -235,17 +263,20 @@ fn layers() -> RenderLayers {
     RenderLayers::layer(UI_LAYER)
 }
 
-/// Spawns the window root with its themed panel quads.
+/// Spawns the window root with its themed panel quads (none for bare
+/// windows — labels sit directly at the absolute position).
 fn spawn_window(commands: &mut Commands, assets: &BubbleAssets, rect: &UiWindow) -> Entity {
     let center = screen_to_world(Vec2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
     let root = commands
         .spawn((
             rect.clone(),
             Visibility::default(),
-            Transform::from_translation(center.extend(0.0)),
+            Transform::from_translation(center.extend(rect.lift)),
         ))
         .id();
-    spawn_panel(commands, assets, rect, root);
+    if !rect.bare {
+        spawn_panel(commands, assets, rect, root);
+    }
     root
 }
 
@@ -282,19 +313,20 @@ fn spawn_content(
     ui_assets: &UiAssets,
     theme: &BubbleTheme,
     text_assets: &TextAssets,
+    server: &AssetServer,
     rect: &UiWindow,
     root: Entity,
     content: &Content,
 ) {
     let layers = layers();
     match content {
-        Content::Text { text, x, y } => {
-            let (text2d, font) = pixel_text(text.clone(), text_assets);
+            Content::Text { text, x, y, color } => {
+                  let (text2d, font) = pixel_text(text.clone(), text_assets);
             let row = commands
                 .spawn((
                     text2d,
                     font,
-                    TextColor(theme.text),
+                    TextColor(color.unwrap_or(theme.text)),
                     Anchor::TOP_LEFT,
                     Transform::from_translation(local_offset(rect, *x, *y, Z_TEXT)),
                     layers,
@@ -346,6 +378,22 @@ fn spawn_content(
                 y: *y,
                 cursor,
             });
+        }
+        Content::Image { path, x, y, w, h } => {
+            let sprite = commands
+                .spawn((
+                    Sprite {
+                        image: server.load(path.clone()),
+                        custom_size: Some(Vec2::new(*w, *h)),
+                        ..default()
+                    },
+                    // x/y is the image's top-left, like text.
+                    Anchor::TOP_LEFT,
+                    Transform::from_translation(local_offset(rect, *x, *y, Z_IMAGE)),
+                    layers,
+                ))
+                .id();
+            commands.entity(root).add_child(sprite);
         }
         Content::Bar { x, y, w, ratio } => {
             // Quads center on their transform, so each bar piece is
@@ -426,6 +474,7 @@ pub(crate) fn drain(
     ui_assets: Res<UiAssets>,
     theme: Res<BubbleTheme>,
     text_assets: Res<TextAssets>,
+    server: Res<AssetServer>,
 ) {
     let requests: Vec<UiRequest> = api
         .requests
@@ -448,7 +497,14 @@ pub(crate) fn drain(
                 closes.insert(name.clone());
                 pending.remove(&name);
             }
-            UiRequest::Window { name, x, y, w, h } => {
+            UiRequest::Window {
+                name,
+                x,
+                y,
+                w,
+                h,
+                lift,
+            } => {
                 closes.remove(&name);
                 pending.insert(
                     name,
@@ -457,12 +513,59 @@ pub(crate) fn drain(
                         y,
                         w,
                         h,
+                        bare: false,
+                        lift,
                         content: Vec::new(),
                     },
                 );
             }
-            UiRequest::Text { window, text, x, y } => match pending.get_mut(&window) {
-                Some(slot) => slot.content.push(Content::Text { text, x, y }),
+            UiRequest::Label {
+                name,
+                text,
+                x,
+                y,
+                color,
+            } => {
+                closes.remove(&name);
+                pending.insert(
+                    name,
+                    Pending {
+                        x,
+                        y,
+                        w: 0.0,
+                        h: 0.0,
+                        bare: true,
+                        lift: 0.0,
+                        content: vec![Content::Text {
+                            text,
+                            x: 0.0,
+                            y: 0.0,
+                            color: Some(bevy::color::Color::srgb(
+                                color[0], color[1], color[2],
+                            )),
+                        }],
+                    },
+                );
+            }
+            UiRequest::Text {
+                window,
+                text,
+                x,
+                y,
+                color,
+            } => match pending.get_mut(&window) {
+                Some(slot) => slot.content.push(Content::Text { text, x, y, color }),
+                None => warn_undeclared(&mut warned, &window),
+            },
+            UiRequest::Image {
+                window,
+                path,
+                x,
+                y,
+                w,
+                h,
+            } => match pending.get_mut(&window) {
+                Some(slot) => slot.content.push(Content::Image { path, x, y, w, h }),
                 None => warn_undeclared(&mut warned, &window),
             },
             UiRequest::Options {
@@ -507,6 +610,8 @@ pub(crate) fn drain(
             y: slot.y,
             w: slot.w,
             h: slot.h,
+            bare: slot.bare,
+            lift: slot.lift,
         };
         let root = match windows.iter().find(|(_, window)| window.name == name) {
             Some((entity, _)) => {
@@ -517,7 +622,10 @@ pub(crate) fn drain(
                     .despawn_children();
                 // despawn_children takes the panel quads with the
                 // content; put the panel back under the fresh content.
-                spawn_panel(&mut commands, &assets, &rect, entity);
+                // Bare windows (labels) have no panel at all.
+                if !rect.bare {
+                    spawn_panel(&mut commands, &assets, &rect, entity);
+                }
                 entity
             }
             None => spawn_window(&mut commands, &assets, &rect),
@@ -533,6 +641,7 @@ pub(crate) fn drain(
                 &ui_assets,
                 &theme,
                 &text_assets,
+                &server,
                 &rect,
                 root,
                 content,
@@ -666,6 +775,23 @@ mod tests {
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
         world.insert_resource(text::test_assets());
+        {
+            use bevy::asset::{AssetServer, AssetServerMode, UnapprovedPathMode, io::AssetSourceBuilders};
+            let mut builders = AssetSourceBuilders::default();
+            builders.init_default_source("assets", None);
+            let server = AssetServer::new(
+                std::sync::Arc::new(builders.build_sources(false, false)),
+                AssetServerMode::Unprocessed,
+                false,
+                UnapprovedPathMode::Forbid,
+            );
+            // ui_image loads through the server, so the type must be
+            // registered on it.
+            let images = Assets::<Image>::default();
+            server.register_asset(&images);
+            world.insert_resource(images);
+            world.insert_resource(server);
+        }
         world.insert_resource(UiAssets {
             cursor: Handle::default(),
         });
@@ -692,12 +818,14 @@ mod tests {
             y: 10.0,
             w: 100.0,
             h: 50.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
             text: "Hello".into(),
             x: 5.0,
             y: 5.0,
+            color: None,
         });
         api.push(UiRequest::Options {
             window: "menu".into(),
@@ -722,12 +850,14 @@ mod tests {
             y: 20.0,
             w: 90.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
             text: "Hello".into(),
             x: 5.0,
             y: 5.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
         assert_eq!(window_names(&mut world), vec!["menu".to_owned()]);
@@ -740,6 +870,39 @@ mod tests {
     }
 
     #[test]
+    fn images_land_in_the_window_as_sized_sprites() {
+        let (mut world, api) = ui_world();
+        api.push(UiRequest::Window {
+            name: "menu".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+            lift: 0.0,
+        });
+        api.push(UiRequest::Image {
+            window: "menu".into(),
+            path: "ui/wakeful_title.png".into(),
+            x: 4.0,
+            y: 6.0,
+            w: 198.0,
+            h: 34.0,
+        });
+        world.run_system_once(drain).unwrap();
+        // The panel draws quads, not sprites: every sprite here is an image.
+        let mut sprites = world.query::<&Sprite>();
+        let found: Vec<Option<Vec2>> = sprites
+            .iter(&world)
+            .map(|sprite| sprite.custom_size)
+            .collect();
+        assert_eq!(
+            found,
+            vec![Some(Vec2::new(198.0, 34.0))],
+            "the image draws at its declared size"
+        );
+    }
+
+    #[test]
     fn close_forgets_the_window_and_the_cursor() {
         let (mut world, api) = ui_world();
         api.push(UiRequest::Window {
@@ -748,6 +911,7 @@ mod tests {
             y: 0.0,
             w: 50.0,
             h: 50.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Options {
             window: "menu".into(),
@@ -774,6 +938,7 @@ mod tests {
             text: "hi".into(),
             x: 0.0,
             y: 0.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
         assert!(window_names(&mut world).is_empty());
@@ -802,6 +967,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Close {
             name: "menu".into(),
@@ -820,6 +986,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         world.run_system_once(drain).unwrap();
         assert_eq!(window_names(&mut world), vec!["menu".to_owned()]);
@@ -834,12 +1001,14 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
             text: "hi".into(),
             x: 4.0,
             y: 4.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
 
@@ -851,12 +1020,14 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
             text: "hi".into(),
             x: 4.0,
             y: 4.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
 
@@ -876,6 +1047,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Options {
             window: "menu".into(),
@@ -911,6 +1083,8 @@ mod tests {
             y: 0.0,
             w: GAME_WIDTH as f32,
             h: GAME_HEIGHT as f32,
+            bare: false,
+            lift: 0.0,
         };
         let assets = world.resource::<BubbleAssets>().clone();
         let mut commands = world.commands();
