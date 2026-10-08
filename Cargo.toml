@@ -24,8 +24,23 @@ serde = { version = "1", features = ["derive"] }
 # Same major version bevy_image pulls in, PNG-only: encodes debug
 # screenshots (see src/debug_shot.rs).
 image = { version = "0.25", default-features = false, features = ["png"] }
+rmcp = { version = "3.5.0", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8.9"
+tokio = { version = "1.53.2", features = ["full"] }
+base64 = "0.23.1"
+serde_json = "1.0.151"
+schemars = "1.2.2"
+rustyline = "18.0.1"
 
 [dev-dependencies]
 # Mirrors bevy_gltf's own parser: validates the generated character model
 # without standing up the whole asset-server pipeline.
 gltf = "1.4"
+
+# The dev build was running ALL of bevy/wgpu at opt-level 0, which
+# cost ~25fps in the scene on the RX 580: the render pipeline is the
+# per-frame work, and it lives in dependencies. Optimizing deps while
+# keeping our own crate debuggable gets most of the speed without the
+# release build's rebuild times.
+[profile.dev.package."*"]
+opt-level = 2
