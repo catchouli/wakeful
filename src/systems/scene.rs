@@ -16,20 +16,50 @@ use crate::systems::depth_card;
 use crate::systems::party::Party;
 use crate::systems::player;
 use crate::systems::ui::{UiApi, UiWindow, close_all};
+use crate::walkmesh;
 use crate::world_state::WorldState;
 use crate::{CurrentScene, GameCameraQuery, Ground, PendingTeleport, Player, PlayerModel, PlayerSpawn, SceneApplied, TeleporterArmed};
 
 /// The scene file the game loads; the editor saves back to this path via
 /// the copy stored on `CurrentScene`.
-const SCENE_PATH: &str = "scenes/devroom.scene";
+/// The scene a fresh boot plays; also what a missing/corrupt save
+/// falls back to.
+pub(crate) const DEFAULT_SCENE_PATH: &str = "scenes/devroom.scene";
 
-pub fn load_scene(mut commands: Commands, assets: Res<AssetServer>) {
+/// A scene a script picked for the next boot: the path plus, if the
+/// save restored it, where the player stands in it. Consumed by
+/// [`load_desired_scene`].
+#[derive(Clone, Debug, Resource)]
+pub(crate) struct DesiredScene {
+    pub(crate) path: String,
+    pub(crate) spawn: Option<Vec2>,
+}
+
+/// Applies a [`DesiredScene`] exactly once — the boot path into
+/// `apply_scene` (which expects `CurrentScene` + `SceneApplied` +
+/// `PlayerSpawn` already set).
+pub(crate) fn load_desired_scene(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    desired: Option<Res<DesiredScene>>,
+) {
+    let Some(desired) = desired else {
+        return;
+    };
+    let handle = assets.load(desired.path.clone());
     commands.insert_resource(CurrentScene {
-        handle: assets.load(SCENE_PATH),
-        path: SCENE_PATH.to_string(),
+        handle,
+        path: desired.path.clone(),
     });
     commands.insert_resource(SceneApplied(false));
+    if let Some(spawn) = desired.spawn {
+        commands.insert_resource(crate::PlayerSpawn(spawn));
+    } else {
+        commands.remove_resource::<crate::PlayerSpawn>();
+    }
+    commands.remove_resource::<DesiredScene>();
 }
+
 
 /// The scene's script runtime, spawned when the scene applies and
 /// despawned with it. `entered` gates the one-shot `on_enter`.
@@ -39,6 +69,14 @@ pub(crate) struct SceneScript {
     scope: Scope<'static>,
     entered: bool,
 }
+
+/// Everything a scene transition tears down: depth cards (built or
+/// pending), actors, bubbles.
+type SceneTeardown<'w, 's> = (
+    Query<'w, 's, Entity, Or<(With<depth_card::DepthCard>, With<depth_card::DepthCardPending>)>>,
+    Query<'w, 's, Entity, With<Actor>>,
+    Query<'w, 's, Entity, With<SpeechBubble>>,
+);
 
 /// Tears the old scene down when a teleporter was touched: despawns
 /// everything it brought (depth card, actors, bubbles) and points
@@ -53,9 +91,7 @@ pub fn transition_scene(
     current: Option<ResMut<CurrentScene>>,
     applied: Option<ResMut<SceneApplied>>,
     mut party: ResMut<Party>,
-    cards: Query<Entity, Or<(With<depth_card::DepthCard>, With<depth_card::DepthCardPending>)>>,
-    actors: Query<Entity, With<Actor>>,
-    bubbles: Query<Entity, With<SpeechBubble>>,
+    teardown: SceneTeardown<'_, '_>,
     mut scene_scripts: Query<(Entity, &mut SceneScript, Option<&ScriptBroken>)>,
     ui: Res<UiApi>,
     ui_windows: Query<(Entity, &UiWindow)>,
@@ -66,11 +102,8 @@ pub fn transition_scene(
     // The player is NOT despawned: it's a persistent view of the party
     // leader, and rebuilding it would flash the placeholder cone and
     // reload the model every transition. apply_scene repositions it.
-    for entity in cards
-        .iter()
-        .chain(actors.iter())
-        .chain(bubbles.iter())
-    {
+    let (cards, actors, bubbles) = teardown;
+    for entity in cards.iter().chain(actors.iter()).chain(bubbles.iter()) {
         commands.entity(entity).despawn();
     }
     // UI windows are scene-agnostic names over live entities: scene
@@ -124,6 +157,7 @@ pub fn apply_scene(
     ui: Res<UiApi>,
     state: Res<WorldState>,
     battle: Res<crate::battle::BattleHandle>,
+    world: Res<crate::scripts::WorldCommands>,
     graphics: Res<SceneGraphics>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -184,11 +218,14 @@ pub fn apply_scene(
     // after a transition. The player starts facing screen-up (away from
     // the camera).
     let at = spawn.map(|spawn| spawn.0).unwrap_or(Vec2::ZERO);
+    // The walk mesh decides how high the ground is under that spot, so a
+    // village slope does not leave the player hovering or buried.
+    let ground = walkmesh::ground_height(scene.walk_mesh.as_ref(), at.x, at.y, at);
     // The player persists across scenes; on first load there isn't one
     // yet, and it starts as the placeholder cone for the party to dress.
     match players.single_mut() {
         Ok(mut transform) => {
-            transform.translation = Vec3::new(at.x, player::PLAYER_Y, at.y);
+            transform.translation = Vec3::new(at.x, ground + player::PLAYER_Y, at.y);
             transform.rotation = facing_rotation(scene.camera_forward());
         }
         Err(_) => {
@@ -197,6 +234,7 @@ pub fn apply_scene(
                 &mut meshes,
                 &mut materials,
                 at,
+                ground,
                 scene.camera_forward(),
             );
             commands.entity(graphics.0).add_child(player);
@@ -214,7 +252,13 @@ pub fn apply_scene(
             .collect(),
     ));
 
-    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone(), battle.clone());
+    let env = ScriptEnv::new(
+        input.handle(),
+        ui.clone(),
+        state.clone(),
+        battle.clone(),
+        world.clone(),
+    );
     let scene_path = current.path.as_str();
     actor::spawn_actors(
         &mut commands,
@@ -396,7 +440,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: Vec::new(),
             depth_map: depth_map.map(str::to_string),
             depth_range: 32.0,
@@ -474,7 +518,7 @@ mod tests {
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);
-        let mut images = Assets::<Image>::default();
+        let images = Assets::<Image>::default();
         server.register_asset(&images);
         world.insert_resource(server);
         world.insert_resource(crate::systems::ui::UiApi::new());
@@ -530,7 +574,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: vec![Teleporter {
                 position: [3.0, 4.0],
                 size: [1.0, 1.0],
@@ -552,6 +596,7 @@ mod tests {
         world.insert_resource(crate::systems::party::Party::default());
         world.insert_resource(crate::world_state::WorldState::default());
         world.insert_resource(crate::battle::BattleHandle::new());
+        world.insert_resource(crate::scripts::WorldCommands::default());
         let graphics = SceneGraphics(world.spawn_empty().id());
         world.insert_resource(graphics);
         let server = test_asset_server();
