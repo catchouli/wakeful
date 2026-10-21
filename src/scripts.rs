@@ -46,9 +46,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bevy::log::warn;
+use bevy::math::Vec2;
 use bevy::prelude::Component;
+use bevy::prelude::Resource;
 use rhai::{Dynamic, Engine, Map, Position, Scope};
 
+use crate::assets::assets_root;
 use crate::input::{InputCaptures, InputHandle, PadButton};
 use crate::systems::ui::UiApi;
 use crate::world_state::{SharedMap, WorldState};
@@ -100,12 +103,28 @@ pub enum UiRequest {
         y: f32,
         w: f32,
         h: f32,
+        /// World-unit lift toward the camera, for stacked bubbles (the
+        /// command menu sits above the status panel).
+        lift: f32,
     },
     Text {
         window: String,
         text: String,
         x: f32,
         y: f32,
+        /// Override for the theme's text color (white damage numbers
+        /// over dark bars, colored float labels).
+        color: Option<bevy::color::Color>,
+    },
+    /// Bare colored text at an absolute screen position — no bubble,
+    /// no panel: floating damage numbers and the like. Re-issued per
+    /// tick like windows; a label not re-issued disappears.
+    Label {
+        name: String,
+        text: String,
+        x: f32,
+        y: f32,
+        color: [f32; 3],
     },
     Options {
         window: String,
@@ -164,6 +183,40 @@ pub struct ScriptEnv {
     store: SharedMap,
     params: BTreeMap<String, Dynamic>,
     battle: crate::battle::BattleHandle,
+    world: WorldCommands,
+}
+
+/// Script-requested scene operations, drained each fixed tick by the
+/// engine (Scene-gated): `warp_to` rides the same covered-point
+/// machinery as walking into a teleporter, `teleport_player`
+/// repositions within the current scene.
+#[derive(Clone, Default, Resource)]
+pub struct WorldCommands(std::sync::Arc<std::sync::Mutex<Vec<WorldRequest>>>);
+
+/// A scene operation a script asked for.
+#[derive(Clone, Debug)]
+pub enum WorldRequest {
+    Warp { scene: String, arrival: Vec2 },
+    Teleport { position: Vec2 },
+}
+
+impl WorldCommands {
+    fn push(&self, request: WorldRequest) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request);
+    }
+
+    /// Takes everything queued, leaving the channel empty.
+    pub fn take(&self) -> Vec<WorldRequest> {
+        std::mem::take(
+            &mut self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
 }
 
 impl ScriptEnv {
@@ -174,6 +227,7 @@ impl ScriptEnv {
         ui: UiApi,
         state: WorldState,
         battle: crate::battle::BattleHandle,
+        world: WorldCommands,
     ) -> Self {
         let store = state.store_for("\0detached");
         Self {
@@ -183,6 +237,7 @@ impl ScriptEnv {
             store,
             params: BTreeMap::new(),
             battle,
+            world,
         }
     }
 
@@ -210,6 +265,7 @@ impl ScriptEnv {
             UiApi::new(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            WorldCommands::default(),
         )
     }
 }
@@ -253,6 +309,15 @@ impl CompiledScript {
         // Script print() lands in the game log — diagnostics live in
         // the same place as everything else.
         engine.on_print(|message| bevy::log::info!("[script] {message}"));
+        // `import "lib/<name>" as x;` resolves shared code under the
+        // scripts root, for every tier (a missing module is a compile
+        // error, so a broken import fails loudly like anything else).
+        let mut modules =
+            rhai::module_resolvers::FileModuleResolver::new_with_path(assets_root().join("scripts"));
+        // Libs re-read on every compile: editing a library lands with
+        // the next scene apply or battle staging, no restart needed.
+        modules.enable_cache(false);
+        engine.set_module_resolver(modules);
         register(&mut engine, &source);
         let ast = engine.compile(text)?;
         *source.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -322,6 +387,30 @@ where
     F: Fn(&str) -> Result<T, rhai::ParseError>,
 {
     compile_script_file(&crate::assets::assets_root().join(path), tier, compile)
+}
+
+/// Scene operations: `warp_to` swaps scenes through the transition
+/// (the teleporter flow), `teleport_player` repositions within the
+/// current scene. Requests land in the shared [`WorldCommands`] and the
+/// engine drains them Scene-side.
+fn register_world_api(engine: &mut Engine, sink: &WorldCommands) {
+    {
+        let sink = sink.clone();
+        engine.register_fn("warp_to", move |scene: &str, x: f64, z: f64| {
+            sink.push(WorldRequest::Warp {
+                scene: scene.to_owned(),
+                arrival: Vec2::new(x as f32, z as f32),
+            });
+        });
+    }
+    {
+        let sink = sink.clone();
+        engine.register_fn("teleport_player", move |x: f64, z: f64| {
+            sink.push(WorldRequest::Teleport {
+                position: Vec2::new(x as f32, z as f32),
+            });
+        });
+    }
 }
 
 /// Registers the party mutators every tier shares: calls append to the
@@ -458,6 +547,21 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 y: y as f32,
                 w: w as f32,
                 h: h as f32,
+                lift: 0.0,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_window_lift",
+        move |name: &str, x: f64, y: f64, w: f64, h: f64, lift: f64| {
+            api.push(UiRequest::Window {
+                name: name.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                w: w as f32,
+                h: h as f32,
+                lift: lift as f32,
             });
         },
     );
@@ -470,6 +574,28 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 text: text.to_owned(),
                 x: x as f32,
                 y: y as f32,
+                color: None,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_text",
+        move |window: &str, text: &str, x: f64, y: f64, color: rhai::Array| {
+            let channel = |v: &rhai::Dynamic| -> f32 {
+                v.clone().try_cast::<f64>().unwrap_or(1.0) as f32
+            };
+            let rgb = [
+                color.first().map(&channel).unwrap_or(1.0),
+                color.get(1).map(&channel).unwrap_or(1.0),
+                color.get(2).map(&channel).unwrap_or(1.0),
+            ];
+            api.push(UiRequest::Text {
+                window: window.to_owned(),
+                text: text.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                color: Some(bevy::color::Color::srgb(rgb[0], rgb[1], rgb[2])),
             });
         },
     );
@@ -499,6 +625,27 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 y: y as f32,
                 w: w as f32,
                 ratio: ratio as f32,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_label",
+        move |name: &str, text: &str, x: f64, y: f64, color: rhai::Array| {
+            let channel = |v: &rhai::Dynamic| -> f32 {
+                v.clone().try_cast::<f64>().unwrap_or(1.0) as f32
+            };
+            let rgb = [
+                color.first().map(&channel).unwrap_or(1.0),
+                color.get(1).map(&channel).unwrap_or(1.0),
+                color.get(2).map(&channel).unwrap_or(1.0),
+            ];
+            api.push(UiRequest::Label {
+                name: name.to_owned(),
+                text: text.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                color: rgb,
             });
         },
     );
@@ -681,6 +828,18 @@ impl ActorScript {
         self.script.call(scope, name, (arg,))
     }
 
+    /// The two-argument flavor (battle choreographies take the actor
+    /// and a state map).
+    pub fn call_dynamic2(
+        &self,
+        scope: &mut Scope,
+        name: &str,
+        first: Dynamic,
+        second: Dynamic,
+    ) -> Result<Dynamic, ScriptError> {
+        self.script.call(scope, name, (first, second))
+    }
+
     /// Runs one `on_update`. The position is `None` when the script (or
     /// its missing `on_update`) wants the actor to stay put;
     /// `Some([x, z])` is the new ground position. `said` carries
@@ -773,6 +932,7 @@ impl SceneScript {
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
+                register_world_api(engine, &env.world);
                 crate::battle::register_battle_api(engine, &env.battle, source);
                 crate::battle::register_battle_readers(engine, &env.battle);
             })?,
@@ -875,11 +1035,28 @@ impl WorldScript {
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
+                register_world_api(engine, &env.world);
                 crate::battle::register_battle_api(engine, &env.battle, source);
                 crate::battle::register_battle_readers(engine, &env.battle);
             })?,
             party,
         })
+    }
+
+    /// Calls a no-argument entry point and returns its value plus any
+    /// party changes it queued — the debug console's path.
+    pub fn call_console(&self, name: &str) -> Result<(Dynamic, Vec<PartyCommand>), ScriptError> {
+        self.party
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let mut scope = Scope::new();
+        let result = self.script.call(&mut scope, name, ())?;
+        let changes = std::mem::take(&mut *self
+            .party
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner));
+        Ok((result, changes))
     }
 
     /// Runs `on_update(dt)` for one fixed tick, returning any party
@@ -1313,6 +1490,7 @@ mod tests {
                 UiApi::new(),
                 WorldState::default(),
                 crate::battle::BattleHandle::new(),
+                crate::scripts::WorldCommands::default(),
             ),
         )
         .unwrap();
@@ -1333,6 +1511,7 @@ mod tests {
                 UiApi::new(),
                 WorldState::default(),
                 crate::battle::BattleHandle::new(),
+                crate::scripts::WorldCommands::default(),
             ),
         )
         .unwrap();
@@ -1375,6 +1554,7 @@ mod tests {
                 UiApi::new(),
                 WorldState::default(),
                 crate::battle::BattleHandle::new(),
+                crate::scripts::WorldCommands::default(),
             ),
         )
         .unwrap();
@@ -1421,6 +1601,7 @@ mod tests {
                 api.clone(),
                 WorldState::default(),
                 crate::battle::BattleHandle::new(),
+                crate::scripts::WorldCommands::default(),
             ),
         )
         .unwrap();
@@ -1538,6 +1719,7 @@ mod tests {
             UiApi::new(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         let script = ActorScript::compile_with_handle(
             r#"
@@ -1597,6 +1779,7 @@ mod tests {
             UiApi::new(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         let writer = ActorScript::compile_with_handle(
             r#"fn on_update(x, z, player_x, player_z, dt) { remember_global("met.goblin", true); }"#,
@@ -1662,6 +1845,7 @@ mod tests {
                 UiApi::new(),
                 WorldState::default(),
                 battle.clone(),
+                crate::scripts::WorldCommands::default(),
             ),
         )
         .expect("the shipped camera script compiles");

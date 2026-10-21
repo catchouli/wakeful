@@ -64,8 +64,16 @@ fn greet() {
 // participants. The engine owns the staging and the turn sequencer;
 // everything about WHO fights and WHAT the actions do lives here.
 fn challenge() {
-    battle_action("attack", "attack_action");
+    // The attack is a choreography file: the hero runs in, swings, and
+    // the damage lands on the strike beat (see the file's header).
+    battle_action_file("attack", "scripts/battle/attack_weapon.rhai");
     battle_action("flee", "flee_action");
+    // The hero fights with the sheet's numbers: the roster owns them
+    // (levels, gear, everything) and the battle bag just mirrors what
+    // the fight needs.
+    let sheets = recall_global("sheets");
+    let sheet = sheets["hero"];
+    let ember = sheets["ember"];
     start_battle(
         "models/arena.glb",
         #{
@@ -79,15 +87,33 @@ fn challenge() {
                 position: [0.0, 0.0, 3.0],
                 facing: 180.0,
                 brain: "scripts/battle/player_brain.rhai",
-                bag: #{hp: 87.0, max_hp: 100.0},
+                bag: #{hp: sheet.hp, max_hp: sheet.max_hp, quick: sheet.quick},
+            },
+            #{
+                id: "ember",
+                player: true,
+                model: "models/character.glb",
+                position: [1.4, 0.0, 3.6],
+                facing: 180.0,
+                brain: "scripts/battle/player_brain.rhai",
+                bag: #{hp: ember.hp, max_hp: ember.max_hp, mp: ember.mp,
+                    max_mp: ember.max_mp, quick: ember.quick},
             },
             #{
                 id: "goblin",
                 model: "models/goblin.glb",
-                position: [0.0, 0.0, -3.0],
+                position: [-0.7, 0.0, -3.0],
                 facing: 0.0,
                 brain: "scripts/battle/goblin_brain.rhai",
-                bag: #{hp: 30.0, max_hp: 30.0},
+                bag: #{hp: 30.0, max_hp: 30.0, quick: 4.0},
+            },
+            #{
+                id: "goblin2",
+                model: "models/goblin.glb",
+                position: [0.9, 0.0, -3.6],
+                facing: 0.0,
+                brain: "scripts/battle/goblin_brain.rhai",
+                bag: #{hp: 24.0, max_hp: 24.0, quick: 3.0},
             },
         ],
     );
@@ -96,20 +122,6 @@ fn challenge() {
 // The attack: whoever acts plays a swing-ish emote, the nearest foe
 // (here: the only foe) takes fixed damage, and the number floats up
 // over them. The recovery time this returns is what spaces the turns.
-fn attack_action(actor_id) {
-    battle_emote(actor_id, "pick_up");
-    let foe = first_foe(actor_id);
-    if foe != () {
-        let hp = battle_bag_get(foe.id, "hp") - 12.0;
-        battle_bag_set(foe.id, "hp", hp);
-        float_text(foe, "-12");
-        if hp <= 0 {
-            end_battle("victory");
-        }
-    }
-    1.2
-}
-
 fn flee_action(actor_id) {
     end_battle("fled");
     0.5
@@ -124,13 +136,4 @@ fn first_foe(me) {
     ()
 }
 
-// Floating damage numbers are script-side too: drop an entry in the
-// battle store and the battle UI world script projects and animates it.
-fn float_text(foe, text) {
-    let floats = battle_get("floats");
-    if floats == () {
-        floats = [];
-    }
-    floats.push(#{text: text, x: foe.x, y: foe.y + 1.4, z: foe.z, age: 0.0});
-    battle_set("floats", floats);
-}
+
