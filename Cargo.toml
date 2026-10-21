@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "An RPG about identity and finding yourself"
 publish = false
+# `cargo run` with no arguments still means the game; the editor is
+# reached with `--bin editor`.
+default-run = "wakeful"
 
 [dependencies]
 bevy = "0.19"
@@ -12,8 +15,14 @@ bevy = "0.19"
 # dev tool render headless on software GL.
 bevy_render = { version = "0.19", default-features = false, features = ["gles"] }
 bevy_common_assets = { version = "0.17", features = ["ron"] }
-# In-game scene editor UI.
+# The editor's actor list, properties and context menus. The game does not
+# link it: the editor is its own binary (`cargo run --bin editor`), which
+# reads this crate's library for the scene file, the walk mesh and the
+# assets root.
 bevy_egui = "0.42"
+# The scene editor is a separate binary (`cargo run --bin editor`), which
+# reads this same crate's library: the scene file, the walk mesh, the
+# assets root. The game itself carries no editor code.
 # Actor scripts: embedded, sandboxed scripting (no file/network access by
 # default); wired to the game by hand since bevy_mod_scripting doesn't
 # support Bevy 0.19 yet. `sync` makes ASTs/Scopes Send+Sync so they can
@@ -24,6 +33,13 @@ serde = { version = "1", features = ["derive"] }
 # Same major version bevy_image pulls in, PNG-only: encodes debug
 # screenshots (see src/debug_shot.rs).
 image = { version = "0.25", default-features = false, features = ["png"] }
+rmcp = { version = "3.5.0", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8.9"
+tokio = { version = "1.53.2", features = ["full"] }
+base64 = "0.23.1"
+serde_json = "1.0.151"
+schemars = "1.2.2"
+rustyline = "18.0.1"
 
 [dev-dependencies]
 # Mirrors bevy_gltf's own parser: validates the generated character model

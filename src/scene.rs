@@ -1,6 +1,5 @@
 //! Scene definitions: the data behind one "room" of the game — background
-//! image, fixed camera pose, walkable area, and the player's character
-//! model. Loaded from RON files in `assets/scenes/`.
+//! image, fixed camera pose, walkable ground, and the placed actors. Loaded from RON files in `assets/scenes/`.
 
 use bevy::asset::Asset;
 use bevy::math::Vec2;
@@ -9,7 +8,9 @@ use rhai::Dynamic;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Asset, TypePath, Deserialize, Serialize)]
+pub use crate::walkmesh::WalkMesh;
+
+#[derive(Asset, TypePath, Deserialize, Serialize, Clone)]
 pub struct Scene {
     /// Path to the background image, relative to `assets/`. Expected to be
     /// the game's virtual resolution (320x240), like a pre-rendered FF7 room.
@@ -33,7 +34,11 @@ pub struct Scene {
     #[serde(default)]
     pub pan: Option<PanSpec>,
     pub camera: CameraPose,
-    pub walkable: Option<WalkableGrid>,
+    /// The ground characters walk on: a triangulated surface, exported
+    /// from the blend file's walk mesh. Absent means nothing bounds
+    /// movement, which is what a bare test room wants.
+    #[serde(default)]
+    pub walk_mesh: Option<WalkMesh>,
     /// Trigger rects that load another scene when the player touches one.
     #[serde(default)]
     pub teleporters: Vec<Teleporter>,
@@ -74,14 +79,34 @@ impl PanSpec {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Copy)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
 pub struct CameraPose {
     pub position: [f32; 3],
     pub target: [f32; 3],
     pub fov_degrees: f32,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+/// The scene files that ship with the game, by name under `assets/scenes`.
+/// The editor's scene picker will offer exactly these.
+pub const SHIPPED_SCENES: &[&str] = &[
+    "devroom.scene",
+    "room2.scene",
+    "Village_Entrance.scene",
+    "Shops_And_Bar.scene",
+];
+
+/// Reads a shipped scene file straight off disk, by name. A running game
+/// gets its scene through the asset server instead; this is the path for
+/// anything that wants the file rather than the loaded asset, which today
+/// means the tests on both sides of the library.
+pub fn read_shipped(name: &str) -> Scene {
+    let path = crate::assets::assets_root().join("scenes").join(name);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?} is readable: {e}"));
+    ron::from_str(&text).unwrap_or_else(|e| panic!("{name} parses: {e}"))
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct Teleporter {
     /// World XZ center of the trigger rect.
     pub position: [f32; 2],
@@ -93,10 +118,29 @@ pub struct Teleporter {
     pub arrival: [f32; 2],
 }
 
+/// Serializes a scene the way the exporter's output reads: indented, but
+/// with arrays left on one line.
+///
+/// The arrays are the point. A walk mesh is thousands of vertices, and one
+/// per line turns every re-export into a ten-thousand-line diff nobody can
+/// read — which is the whole reason the exporter stopped writing scene
+/// files itself.
+///
+/// Comments do not survive this: RON has no way to write one back, so a
+/// scene file is a generated artifact and anything a scene needs said
+/// belongs somewhere else.
+pub fn to_ron(scene: &Scene) -> Result<String, ron::Error> {
+    let config = ron::ser::PrettyConfig::default().compact_arrays(true);
+    let mut ron = ron::ser::to_string_pretty(scene, config)?;
+    ron.push('\n');
+    Ok(ron)
+}
+
 impl Teleporter {
     /// Whether the world XZ position lies inside the trigger rect. The
     /// low edge counts as inside, the high edge belongs to the next rect
-    /// over, matching how the walkable grid assigns cell boundaries.
+    /// over, so walking along a shared edge fires the teleporter ahead
+    /// rather than behind.
     pub fn contains(&self, x: f32, z: f32) -> bool {
         let half_x = self.size[0] / 2.0;
         let half_z = self.size[1] / 2.0;
@@ -105,7 +149,7 @@ impl Teleporter {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Actor {
     /// Optional game-wide identity: the key this actor's private
     /// script storage lives under. Two actors with the same id share
@@ -129,12 +173,22 @@ pub struct Actor {
     /// a fixed angle.
     #[serde(default)]
     pub facing: Option<f32>,
+    /// Whether the scene's walk mesh keeps this actor on it. On by
+    /// default: a character that walks stays on the ground. Actors whose
+    /// script places them elsewhere — a bird, a chest on a wall — turn it
+    /// off, and only they are free of the mesh.
+    #[serde(default = "default_constrained")]
+    pub constrained: bool,
     /// Rhai script file relative to `assets/`. The script's
     /// `on_update(x, z, player_x, player_z, dt)` runs every fixed tick;
     /// returning `[x, z]` moves the actor there, returning nothing keeps
     /// it put.
     #[serde(default)]
     pub script: Option<String>,
+}
+
+fn default_constrained() -> bool {
+    true
 }
 
 impl Scene {
@@ -148,276 +202,99 @@ impl Scene {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct WalkableGrid {
-    /// World XZ position of the corner of cell `[0][0]`.
-    pub origin: [f32; 2],
-    pub cell_size: f32,
-    pub cols: usize,
-    pub rows: usize,
-    /// Row-major walkable flags, starting at `origin`, +X along columns,
-    /// +Z along rows.
-    pub cells: Vec<bool>,
-}
-
-impl WalkableGrid {
-    /// Whether the cell containing the world position is walkable.
-    /// Positions outside the grid are never walkable.
-    pub fn is_walkable(&self, x: f32, z: f32) -> bool {
-        let Some((col, row)) = self.cell_at(x, z) else {
-            return false;
-        };
-        self.cells
-            .get(row * self.cols + col)
-            .copied()
-            .unwrap_or(false)
-    }
-
-    /// Grid column/row for a world position, if it falls inside the grid.
-    fn cell_at(&self, x: f32, z: f32) -> Option<(usize, usize)> {
-        if self.cell_size <= 0.0 {
-            return None;
-        }
-        let col = ((x - self.origin[0]) / self.cell_size).floor();
-        let row = ((z - self.origin[1]) / self.cell_size).floor();
-        if col < 0.0 || row < 0.0 {
-            return None;
-        }
-        let (col, row) = (col as usize, row as usize);
-        if col >= self.cols || row >= self.rows {
-            return None;
-        }
-        Some((col, row))
-    }
-
-    /// Restricts a desired movement so the character (a circle of `radius`
-    /// around its center) stays entirely on walkable cells.
-    ///
-    /// Tries the full move first, then each axis alone, so the character
-    /// slides along walls of blocked cells instead of sticking to them.
-    /// Radius `<= 0` constrains the center point alone.
-    pub fn constrain(&self, from: Vec2, to: Vec2, radius: f32) -> Vec2 {
-        if self.is_circle_walkable(to.x, to.y, radius) {
-            return to;
-        }
-        if self.is_circle_walkable(to.x, from.y, radius) {
-            return Vec2::new(to.x, from.y);
-        }
-        if self.is_circle_walkable(from.x, to.y, radius) {
-            return Vec2::new(from.x, to.y);
-        }
-        from
-    }
-
-    /// Whether a circle of `radius` at the position lies entirely on
-    /// walkable cells; cells outside the grid count as blocked. Radius
-    /// `<= 0` reduces to the point test. Touching a blocked cell exactly
-    /// still counts as walkable, so characters can rest against walls.
-    pub fn is_circle_walkable(&self, x: f32, z: f32, radius: f32) -> bool {
-        if self.cell_size <= 0.0 {
-            return false;
-        }
-        if radius <= 0.0 {
-            return self.is_walkable(x, z);
-        }
-        // Only cells overlapping the circle's bounding box can touch the
-        // circle, so the distance test runs against those alone.
-        let min_col = ((x - radius - self.origin[0]) / self.cell_size).floor() as i64;
-        let max_col = ((x + radius - self.origin[0]) / self.cell_size).floor() as i64;
-        let min_row = ((z - radius - self.origin[1]) / self.cell_size).floor() as i64;
-        let max_row = ((z + radius - self.origin[1]) / self.cell_size).floor() as i64;
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let blocked = col < 0
-                    || row < 0
-                    || col as usize >= self.cols
-                    || row as usize >= self.rows
-                    || !self.cells[row as usize * self.cols + col as usize];
-                if !blocked {
-                    continue;
-                }
-                // Distance from the center to the closest point of the
-                // cell's rect; overlap means the circle leaves the
-                // walkable area.
-                let min_x = self.origin[0] + col as f32 * self.cell_size;
-                let min_z = self.origin[1] + row as f32 * self.cell_size;
-                let dx = x - x.clamp(min_x, min_x + self.cell_size);
-                let dz = z - z.clamp(min_z, min_z + self.cell_size);
-                if dx * dx + dz * dz < radius * radius {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    /// Sets the walkable flag of the cell containing the world position.
-    /// Returns false (leaving the grid unchanged) if it lies outside.
-    pub fn set_walkable(&mut self, x: f32, z: f32, walkable: bool) -> bool {
-        let Some((col, row)) = self.cell_at(x, z) else {
-            return false;
-        };
-        self.cells[row * self.cols + col] = walkable;
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn grid() -> WalkableGrid {
-        WalkableGrid {
-            origin: [-2.0, -2.0],
-            cell_size: 1.0,
-            cols: 2,
-            rows: 2,
-            // only cell [0][0] (top-left) is walkable
-            cells: [true, false, false, false].to_vec(),
-        }
+    #[test]
+    fn a_scene_survives_being_written_and_read_back() {
+        // What the editor's save does. Dynamic has no PartialEq, so the
+        // params are compared by what they print as: the values a script
+        // reads back with `param` have to be the values that went in.
+        let src = r#"(
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walk_mesh: Some((
+                vertices: [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+                triangles: [(0, 1, 2)],
+            )),
+            depth_range: 12.5,
+            pan: Some((plate: (640, 480), window: (320, 240))),
+            actors: [
+                (
+                    model: "models/goblin.glb",
+                    position: (-28.3, -106.86),
+                    id: Some("goblin"),
+                    script: Some("scripts/goblin.rhai"),
+                    params: { "item": "bread", "count": 2 },
+                ),
+            ],
+        )"#;
+        let before: Scene = ron::from_str(src).unwrap();
+
+        let text = to_ron(&before).unwrap();
+        let after: Scene = ron::from_str(&text).unwrap();
+
+        assert_eq!(after.camera, before.camera);
+        assert_eq!(after.depth_range, before.depth_range);
+        assert_eq!(after.pan, before.pan);
+        assert_eq!(after.walk_mesh.map(|m| m.vertices), before.walk_mesh.map(|m| m.vertices));
+        assert_eq!(
+            after.actors[0].params.values().map(ToString::to_string).collect::<Vec<_>>(),
+            before.actors[0].params.values().map(ToString::to_string).collect::<Vec<_>>(),
+        );
+        assert_eq!(after.actors[0].position, before.actors[0].position);
+        assert_eq!(after.actors[0].id, before.actors[0].id);
     }
 
     #[test]
-    fn reports_walkable_cells() {
-        let grid = grid();
-        assert!(grid.is_walkable(-1.5, -1.5));
-    }
-
-    #[test]
-    fn reports_blocked_cells() {
-        let grid = grid();
-        assert!(!grid.is_walkable(-0.5, -1.5));
-        assert!(!grid.is_walkable(-1.5, -0.5));
-        assert!(!grid.is_walkable(-0.5, -0.5));
-    }
-
-    #[test]
-    fn outside_the_grid_is_never_walkable() {
-        let grid = grid();
-        assert!(!grid.is_walkable(50.0, 50.0));
-        assert!(!grid.is_walkable(-3.0, -1.5));
-        assert!(!grid.is_walkable(-1.5, -3.0));
-    }
-
-    #[test]
-    fn positions_on_cell_edges_floor_consistently() {
-        let grid = grid();
-        // exactly on the boundary between cell 0 and cell 1 belongs to cell 1
-        assert!(!grid.is_walkable(-1.0, -1.5));
-    }
-
-    #[test]
-    fn constrain_keeps_free_moves() {
-        let grid = grid();
-        let from = Vec2::new(-1.5, -1.5);
-        let to = Vec2::new(-1.4, -1.4);
-        assert_eq!(grid.constrain(from, to, 0.0), to);
-    }
-
-    #[test]
-    fn constrain_slides_along_blocked_cells() {
-        let grid = grid();
-        // moving right into a blocked cell slides on Z, the free axis
-        let from = Vec2::new(-1.5, -1.5);
-        let to = Vec2::new(-0.5, -1.4);
-        assert_eq!(grid.constrain(from, to, 0.0), Vec2::new(-1.5, -1.4));
-    }
-
-    #[test]
-    fn constrain_stops_when_surrounded() {
-        let grid = grid();
-        // diagonal target, X neighbor, and Z neighbor are all blocked
-        let from = Vec2::new(-1.5, -1.5);
-        let to = Vec2::new(-0.5, -0.4);
-        assert_eq!(grid.constrain(from, to, 0.0), from);
-    }
-
-    #[test]
-    fn constrain_rejects_moves_that_overhang_the_region() {
-        // The center point of `to` is walkable, but a body of radius 0.4
-        // around it would stick out past the grid's far edge.
-        let mut grid = grid();
-        grid.cols = 5;
-        grid.rows = 5;
-        grid.origin = [-2.5, -2.5];
-        grid.cells = vec![true; 25];
-        let from = Vec2::new(0.0, 0.0);
-        let to = Vec2::new(0.0, -2.15);
-        assert_eq!(grid.constrain(from, to, 0.4), from);
-        // Close enough to keep the whole body inside: the move passes.
-        let near_edge = Vec2::new(0.0, -2.05);
-        assert_eq!(grid.constrain(from, near_edge, 0.4), near_edge);
-    }
-
-    #[test]
-    fn a_body_fits_through_one_cell_wide_corridors() {
-        // Only the middle row is walkable; a radius-0.4 body passes down
-        // its centerline without touching the blocked rows.
-        let mut grid = grid();
-        grid.cols = 3;
-        grid.rows = 3;
-        grid.origin = [-1.5, -1.5];
-        grid.cells = vec![false, false, false, true, true, true, false, false, false];
-        let from = Vec2::new(-1.0, 0.0);
-        let to = Vec2::new(1.0, 0.0);
-        assert_eq!(grid.constrain(from, to, 0.4), to);
-    }
-
-    #[test]
-    fn a_body_rests_against_blocked_cells() {
-        // Moving toward a blocked cell stops where the body touches it.
-        let mut grid = grid();
-        grid.cols = 3;
-        grid.rows = 1;
-        grid.origin = [-1.5, -0.5];
-        grid.cells = vec![true, true, false];
-        let from = Vec2::new(-1.0, 0.0);
-        let to = Vec2::new(0.5, 0.0);
-        // The blocked cell spans x [0.5, 1.5]; the body's edge rests at its
-        // boundary, so the center stops 0.4 short of it.
-        assert_eq!(grid.constrain(from, to, 0.4), from);
-        let resting = Vec2::new(0.1, 0.0);
-        assert_eq!(grid.constrain(from, resting, 0.4), resting);
-    }
-
-    #[test]
-    fn set_walkable_flips_the_cell_under_a_position() {
-        let mut grid = grid();
-        assert!(!grid.is_walkable(-0.5, -1.5));
-        assert!(grid.set_walkable(-0.5, -1.5, true));
-        assert!(grid.is_walkable(-0.5, -1.5));
-        assert!(grid.set_walkable(-0.5, -1.5, false));
-        assert!(!grid.is_walkable(-0.5, -1.5));
-    }
-
-    #[test]
-    fn set_walkable_ignores_outside_positions() {
-        let mut grid = grid();
-        assert!(!grid.set_walkable(50.0, 50.0, true));
-        assert_eq!(grid.cells, [true, false, false, false]);
-    }
-
-    #[test]
-    fn parses_scene_ron() {
+    fn parsing_scene_ron() {
         let src = r#"(
             background: Some("backgrounds/room1.png"),
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: Some((
-                origin: (-2.0, -2.0),
-                cell_size: 1.0,
-                cols: 2,
-                rows: 2,
-                cells: [true, false, false, true],
+            walk_mesh: Some(WalkMesh(
+                vertices: [(-2.0, 0.0, -2.0), (0.0, 0.0, -2.0), (-2.0, 0.0, 0.0)],
+                triangles: [(0, 1, 2)],
             )),
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert_eq!(scene.camera.position, [0.0, 6.0, 9.0]);
         assert_eq!(scene.camera.fov_degrees, 45.0);
-        let grid = scene.walkable.unwrap();
-        assert!(grid.is_walkable(-1.5, -1.5));
-        assert!(!grid.is_walkable(-0.5, -1.5));
+        let mesh = scene.walk_mesh.expect("the walk mesh parses");
+        assert!(mesh.contains(-1.5, -1.5));
+        assert!(!mesh.contains(-0.5, -0.5));
         // The pan spec is optional: absent means the view is pinned.
         assert_eq!(scene.pan, None);
+    }
+
+    #[test]
+    fn the_walk_mesh_is_optional() {
+        // Scenes written before walk meshes existed keep loading, and
+        // bound nothing.
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert!(scene.walk_mesh.is_none());
+    }
+
+    #[test]
+    fn a_walk_mesh_round_trips_through_ron() {
+        let mut mesh = WalkMesh::default();
+        mesh.vertices = vec![[-2.0, 0.5, -2.0], [0.0, 0.0, -2.0], [-2.0, 0.0, 0.0]];
+        mesh.triangles = vec![[0, 1, 2]];
+        let scene = Scene {
+            walk_mesh: Some(mesh),
+            ..devroom_scene()
+        };
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        let reparsed: Scene = ron::from_str(&text).unwrap();
+        let mesh = reparsed.walk_mesh.expect("the walk mesh round trips");
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.triangles, [[0, 1, 2]]);
+        assert!(mesh.contains(-1.5, -1.5));
+        // The skipped acceleration buckets must not leak into the file.
+        assert!(!text.contains("buckets"));
     }
 
     #[test]
@@ -441,7 +318,7 @@ mod tests {
         let src = r#"(
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: None,
+            walk_mesh: None,
             teleporters: [
                 (
                     position: (4.0, 0.0),
@@ -469,7 +346,7 @@ mod tests {
         let src = r#"(
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: None,
+            walk_mesh: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert!(scene.teleporters.is_empty());
@@ -484,7 +361,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: vec![Teleporter {
                 position: [4.0, 0.0],
                 size: [2.0, 1.0],
@@ -521,7 +398,7 @@ mod tests {
         let src = r#"(
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: None,
+            walk_mesh: None,
             script: Some("scripts/room_intro.rhai"),
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
@@ -531,7 +408,7 @@ mod tests {
         let src = r#"(
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: None,
+            walk_mesh: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert_eq!(scene.script, None);
@@ -561,149 +438,83 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_teleporter_pair_is_consistent() {
-        // Both halves must parse, and each side's arrival point must sit
-        // inside the destination's trigger region with the player's whole
-        // body on walkable ground: a point that is on the grid but whose
-        // body overhangs its edge leaves the player stuck (constrain
-        // rejects whole moves, it doesn't step out).
-        let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
-        let room2: Scene = ron::from_str(include_str!("../assets/scenes/room2.scene")).unwrap();
-        let radius = crate::systems::player::PLAYER_RADIUS;
-
-        let [to_room2] = &devroom.teleporters[..] else {
-            panic!("devroom ships exactly one test teleporter");
-        };
-        assert_eq!(to_room2.target, "scenes/room2.scene");
-        let grid2 = room2
-            .walkable
-            .as_ref()
-            .expect("room2 needs a walkable grid");
-        assert!(grid2.is_circle_walkable(to_room2.arrival[0], to_room2.arrival[1], radius));
-        let [from_room2] = &room2.teleporters[..] else {
-            panic!("room2 ships exactly one return teleporter");
-        };
-        assert!(from_room2.contains(to_room2.arrival[0], to_room2.arrival[1]));
-
-        let [to_devroom] = &room2.teleporters[..] else {
-            panic!("room2 ships exactly one return teleporter");
-        };
-        assert_eq!(to_devroom.target, "scenes/devroom.scene");
-        let grid1 = devroom
-            .walkable
-            .as_ref()
-            .expect("devroom needs a walkable grid");
-        assert!(grid1.is_circle_walkable(to_devroom.arrival[0], to_devroom.arrival[1], radius));
-        assert!(to_room2.contains(to_devroom.arrival[0], to_devroom.arrival[1]));
+    fn every_shipped_scene_parses() {
+        for name in SHIPPED_SCENES {
+            read_shipped(name);
+        }
     }
 
     #[test]
-    fn the_shipped_devroom_actors_run_contract_abiding_scripts() {
-        let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
-        let grid = devroom
-            .walkable
-            .as_ref()
-            .expect("devroom needs a walkable grid");
-
-        // The demo cast comes and goes while features are probed; every
-        // actor that IS shipped must be contract-abiding, and each
-        // character's contract holds whenever that character ships.
-        for actor in &devroom.actors {
-            assert!(grid.is_walkable(actor.position[0], actor.position[1]));
-            match actor.id.as_deref() {
-                Some("goblin") => {
-                    assert_eq!(actor.model, "models/goblin.glb");
-                    assert_eq!(actor.script.as_deref(), Some("scripts/goblin.rhai"));
-                }
-                Some("tester") => {
-                    assert_eq!(actor.model, "models/goblin.glb");
-                    assert_eq!(actor.script.as_deref(), Some("scripts/tester.rhai"));
-                }
-                Some("entrance-chest") | Some("corner-chest") => {
-                    assert_eq!(actor.model, "models/chest.glb");
-                    assert_eq!(actor.script.as_deref(), Some("scripts/chest.rhai"));
-                    assert!(actor.id.is_some(), "a chest without an id shares memory");
-                    assert!(!actor.shared, "chests are scene-local");
-                    let item = if actor.id.as_deref() == Some("entrance-chest") {
-                        "a health potion"
-                    } else {
-                        "an elixir"
-                    };
-                    assert_eq!(
-                        actor
-                            .params
-                            .get("item")
-                            .and_then(|v| v.clone().into_string().ok()),
-                        Some(item.to_owned())
-                    );
-                }
-                other => panic!("devroom actor with unknown id {other:?}"),
+    fn shipped_walk_meshes_carry_their_actors() {
+        // An actor placed off its scene's mesh stands on nothing (or is
+        // clamped onto it on the first scripted step), so every placed
+        // character has to start on the ground the player walks on.
+        for name in SHIPPED_SCENES {
+            let scene = read_shipped(name);
+            let Some(mesh) = &scene.walk_mesh else {
+                continue;
+            };
+            for actor in &scene.actors {
+                assert!(
+                    mesh.contains(actor.position[0], actor.position[1]),
+                    "{name}: actor {:?} at {:?} is off the walk mesh",
+                    actor.id,
+                    actor.position
+                );
             }
         }
+    }
 
-        // The shipped scripts compile and answer the actor contract.
-        let mut scope = rhai::Scope::new();
-        if let Some(goblin) = devroom
-            .actors
+    #[test]
+    fn a_shipped_walk_mesh_carries_the_ground_its_characters_stand_on() {
+        // The village terrain is not flat, which is the whole reason the
+        // grid was replaced: a character has to ride the surface, not a
+        // constant height.
+        let mesh = read_shipped("Village_Entrance.scene")
+            .walk_mesh
+            .expect("the village entrance exports a walk mesh");
+        let heights: Vec<f32> = [
+            (-28.3, -106.86),
+            (-30.0, -105.0),
+            (-26.5, -105.0),
+            (-31.5, -108.5),
+        ]
+        .iter()
+        .map(|(x, z)| mesh.height_at(*x, *z).expect("the cast stands on it"))
+        .collect();
+        assert!(heights.iter().all(|h| h.is_finite() && *h > 0.0));
+        let lowest = heights.iter().copied().fold(f32::MAX, f32::min);
+        let highest = heights.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            highest - lowest > 0.2,
+            "the arrival, the goblin and the chests stand at {heights:?} — a \
+             flat ground would mean the terrain never made it into the mesh"
+        );
+    }
+
+    #[test]
+    fn the_shipped_teleporter_pair_is_consistent() {
+        // Both halves must parse, and each side's arrival point must sit
+        // inside the destination's trigger region, or the player re-triggers
+        // the moment the transition lands.
+        let devroom = read_shipped("devroom.scene");
+        let room2 = read_shipped("room2.scene");
+
+        let [to_room2] = devroom
+            .teleporters
             .iter()
-            .find(|a| a.id.as_deref() == Some("goblin"))
-        {
-            let goblin_script =
-                crate::scripts::ActorScript::compile(include_str!("../assets/scripts/goblin.rhai"))
-                    .expect("the shipped goblin script must compile");
-            // Far from the player the goblin closes in; close by it
-            // stays put.
-            let moved = goblin_script
-                .update(
-                    &mut scope,
-                    goblin.position[0],
-                    goblin.position[1],
-                    0.0,
-                    0.0,
-                    1.0 / 60.0,
-                )
-                .unwrap()
-                .position
-                .expect("the goblin approaches a far player");
-            assert!(moved[0] > goblin.position[0] && moved[1] < goblin.position[1]);
-            assert_eq!(
-                goblin_script
-                    .update(
-                        &mut scope,
-                        goblin.position[0],
-                        goblin.position[1],
-                        goblin.position[0],
-                        goblin.position[1],
-                        1.0 / 60.0,
-                    )
-                    .unwrap()
-                    .position,
-                None
-            );
-        }
-        if let Some(entrance) = devroom
-            .actors
-            .iter()
-            .find(|a| a.id.as_deref() == Some("entrance-chest"))
-        {
-            let chest_script =
-                crate::scripts::ActorScript::compile(include_str!("../assets/scripts/chest.rhai"))
-                    .expect("the shipped chest script must compile");
-            // A chest with nobody nearby holds still and stays shut.
-            let (chest_x, chest_z) = (entrance.position[0], entrance.position[1]);
-            let tick = chest_script
-                .update(
-                    &mut scope,
-                    chest_x,
-                    chest_z,
-                    chest_x + 50.0,
-                    chest_z + 50.0,
-                    1.0 / 60.0,
-                )
-                .unwrap();
-            assert_eq!(tick.position, None);
-            assert!(tick.emote.is_none());
-        }
+            .filter(|t| t.target == "scenes/room2.scene")
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("devroom ships one teleporter to room2");
+        };
+        assert_eq!(to_room2.target, "scenes/room2.scene");
+        let [from_room2] = &room2.teleporters[..] else {
+            panic!("room2 ships exactly one return teleporter");
+        };
+        assert_eq!(from_room2.target, "scenes/devroom.scene");
+        assert!(from_room2.contains(to_room2.arrival[0], to_room2.arrival[1]));
+        assert!(to_room2.contains(from_room2.arrival[0], from_room2.arrival[1]));
     }
 
     #[test]
@@ -728,7 +539,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: Vec::new(),
             depth_map: None,
             depth_range: 32.0,
@@ -743,7 +554,7 @@ mod tests {
         let src = r#"(
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: None,
+            walk_mesh: None,
             actors: [
                 (
                     model: "models/goblin.glb",
@@ -763,9 +574,29 @@ mod tests {
         assert_eq!(with_script.model, "models/goblin.glb");
         assert_eq!(with_script.position, [1.0, 2.0]);
         assert_eq!(with_script.script.as_deref(), Some("scripts/goblin.rhai"));
+        // Actors stay on the walk mesh unless a script needs them off it.
+        assert!(with_script.constrained);
         assert_eq!(without.model, "models/statue.glb");
         assert_eq!(without.position, [3.0, 4.0]);
         assert_eq!(without.script, None);
+        assert!(without.constrained);
+    }
+
+    #[test]
+    fn an_actor_can_opt_out_of_the_walk_mesh() {
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            actors: [
+                (
+                    model: "models/bird.glb",
+                    position: (3.0, 4.0),
+                    constrained: false,
+                ),
+            ],
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert!(!scene.actors[0].constrained);
     }
 
     #[test]
@@ -773,7 +604,7 @@ mod tests {
         let src = r#"(
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: None,
+            walk_mesh: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert!(scene.actors.is_empty());
@@ -790,6 +621,7 @@ mod tests {
             params: BTreeMap::new(),
             script: Some("scripts/goblin.rhai".into()),
             facing: None,
+            constrained: true,
         }];
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
         let reparsed: Scene = ron::from_str(&text).unwrap();
@@ -802,15 +634,9 @@ mod tests {
 
     #[test]
     fn ships_a_valid_devroom_scene() {
-        // The file the game loads at startup must stay parseable, and its
-        // spawn point (world origin) must remain walkable.
-        let src = include_str!("../assets/scenes/devroom.scene");
-        let scene: Scene = ron::from_str(src).unwrap();
-        assert!(
-            scene
-                .walkable
-                .expect("dev room needs a walkable grid")
-                .is_walkable(0.0, 0.0)
-        );
+        // The file the game loads at startup must stay parseable and
+        // carry a camera, whatever else it holds.
+        let scene = read_shipped("devroom.scene");
+        assert!(scene.camera.fov_degrees > 0.0);
     }
 }

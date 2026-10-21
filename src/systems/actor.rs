@@ -6,6 +6,7 @@ use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use rhai::Scope;
 
+use crate::CurrentScene;
 use crate::GameCamera;
 use crate::Player;
 use crate::movement::{TURN_SPEED, face_direction, facing_rotation};
@@ -16,12 +17,17 @@ use crate::systems::bubble::{self, BubbleTheme};
 use crate::systems::party::Party;
 use crate::systems::scene::{SceneGraphics, gltf_asset_path};
 use crate::text::TextAssets;
+use crate::walkmesh;
 
 /// How long a scripted line stays up before closing itself.
 const SAY_TTL_SECS: f32 = 3.0;
 /// Screen pixels between the actor's projected ground point and the
 /// bubble's center, lifting the bubble above the model.
 const SAY_HEADROOM_PX: f32 = 24.0;
+
+/// How wide a constrained actor's body is, for walk-mesh collision.
+/// Actors are models of unknown size; this matches the player's.
+const ACTOR_RADIUS: f32 = crate::systems::player::PLAYER_RADIUS;
 
 /// Marks an actor whose script has run at least once. The animation
 /// driver keeps a freshly loaded model hidden until this lands (or a
@@ -39,6 +45,9 @@ pub struct Actor {
     /// The line (and its options) currently in that bubble, to dedupe
     /// per-tick repeats.
     said: Option<Said>,
+    /// Whether the scene's walk mesh bounds this actor and carries its
+    /// height. False for actors a script places off the mesh.
+    constrained: bool,
 }
 
 /// A compiled script and its persistent variable scope.
@@ -101,12 +110,17 @@ pub(crate) fn spawn_actors(
                 script,
                 scope: Scope::new(),
             });
+        let at = Vec2::new(actor.position[0], actor.position[1]);
+        // The walk mesh decides how high the ground is under the actor, so
+        // a slope carries its characters instead of leaving them floating.
+        let ground = walkmesh::ground_height(scene.walk_mesh.as_ref(), at.x, at.y, at);
         let entity = commands
             .spawn((
                 Actor {
                     script,
                     bubble: None,
                     said: None,
+                    constrained: actor.constrained,
                 },
                 Visibility::default(),
                 Locomotion::default(),
@@ -116,7 +130,7 @@ pub(crate) fn spawn_actors(
                 ActorModel(assets.load(gltf_asset_path(&actor.model))),
                 // A pinned facing turns the model to a world yaw; otherwise
                 // the actor looks the way the scene camera looks.
-                Transform::from_xyz(actor.position[0], 0.0, actor.position[1]).with_rotation(
+                Transform::from_xyz(at.x, ground, at.y).with_rotation(
                     match actor.facing {
                         Some(degrees) => Quat::from_rotation_y(degrees.to_radians()),
                         None => facing_rotation(toward),
@@ -168,7 +182,9 @@ pub(crate) struct UiAssets<'w> {
 
 /// Runs each actor's `on_update`, applies the returned position, and
 /// shows whatever the script `say`-ed as a speech bubble above it.
-/// Actors are not grid-constrained: their scripts are trusted content.
+/// A constrained actor (the default) is kept on the scene's walk mesh and
+/// rides its height; one with `constrained: false` is trusted content and
+/// goes wherever its script says.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_actor_scripts(
     mut commands: Commands,
@@ -176,6 +192,8 @@ pub(crate) fn run_actor_scripts(
     mut party: ResMut<Party>,
     players: Query<&Transform, With<Player>>,
     cameras: Query<(&Camera, &GlobalTransform), With<GameCamera>>,
+    scenes: Res<Assets<Scene>>,
+    current: Option<Res<CurrentScene>>,
     mut actors: ActorQuery,
     mut bubbles: Query<&mut bubble::SpeechBubble>,
     ui_assets: UiAssets,
@@ -186,6 +204,10 @@ pub(crate) fn run_actor_scripts(
     let (player_x, player_z) = (player.translation.x, player.translation.z);
     let dt = time.delta_secs();
     let camera = cameras.single().ok();
+    let walk_mesh = current
+        .as_ref()
+        .and_then(|c| scenes.get(&c.handle))
+        .and_then(|scene| scene.walk_mesh.as_ref());
     for (entity, mut transform, mut actor, locomotion) in &mut actors {
         let position = &transform.translation;
         // The script polls waiting() to hold its place while the player
@@ -215,10 +237,17 @@ pub(crate) fn run_actor_scripts(
             Ok(tick) => {
                 let from = Vec2::new(position.x, position.z);
                 if let Some([x, z]) = tick.position {
-                    let direction = Vec2::new(x, z) - from;
-                    transform.translation = Vec3::new(x, 0.0, z);
+                    let to = Vec2::new(x, z);
+                    // A constrained actor keeps its whole body on the mesh
+                    // and slides along its edge, like the player.
+                    let to = match (actor.constrained, walk_mesh) {
+                        (true, Some(mesh)) => mesh.constrain(from, to, ACTOR_RADIUS),
+                        _ => to,
+                    };
+                    let ground = walkmesh::ground_height(walk_mesh, to.x, to.y, from);
+                    transform.translation = Vec3::new(to.x, ground, to.y);
                     transform.rotation =
-                        face_direction(transform.rotation, direction, TURN_SPEED, dt);
+                        face_direction(transform.rotation, to - from, TURN_SPEED, dt);
                 }
                 // The gait follows actual displacement, so a script
                 // holding still reads as standing, and an emote goes
@@ -449,6 +478,7 @@ mod tests {
                 }),
                 bubble: None,
                 said: None,
+                constrained: false,
             },
             Transform::from_xyz(1.0, 0.0, 2.0),
         )
@@ -474,7 +504,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: Vec::new(),
             depth_map: None,
             depth_range: 32.0,
@@ -488,6 +518,7 @@ mod tests {
                 params: std::collections::BTreeMap::new(),
                 script: None,
                 facing: None,
+                constrained: true,
             }],
         };
         let server = world.resource::<AssetServer>().clone();
@@ -531,7 +562,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: Vec::new(),
             depth_map: None,
             depth_range: 32.0,
@@ -545,6 +576,7 @@ mod tests {
                 params: std::collections::BTreeMap::new(),
                 script: None,
                 facing: Some(90.0),
+                constrained: true,
             }],
         };
         let server = world.resource::<AssetServer>().clone();
@@ -571,6 +603,110 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_actors_run_contract_abiding_scripts() {
+        // The demo cast lives in a village scene; every actor that IS
+        // shipped must be contract-abiding, and each character's contract
+        // holds whenever that character ships.
+        let scene = crate::scene::SHIPPED_SCENES
+            .iter()
+            .map(|name| crate::scene::read_shipped(name))
+            .find(|scene| !scene.actors.is_empty())
+            .expect("a shipped scene ships actors");
+
+        for actor in &scene.actors {
+            match actor.id.as_deref() {
+                Some("goblin") => {
+                    assert_eq!(actor.model, "models/goblin.glb");
+                    assert_eq!(actor.script.as_deref(), Some("scripts/goblin.rhai"));
+                }
+                Some("tester") => {
+                    assert_eq!(actor.model, "models/goblin.glb");
+                    assert_eq!(actor.script.as_deref(), Some("scripts/tester.rhai"));
+                }
+                Some("entrance-chest") | Some("corner-chest") => {
+                    assert_eq!(actor.model, "models/chest.glb");
+                    assert_eq!(actor.script.as_deref(), Some("scripts/chest.rhai"));
+                    assert!(actor.id.is_some(), "a chest without an id shares memory");
+                    assert!(!actor.shared, "chests are scene-local");
+                    let item = if actor.id.as_deref() == Some("entrance-chest") {
+                        "a health potion"
+                    } else {
+                        "an elixir"
+                    };
+                    assert_eq!(
+                        actor
+                            .params
+                            .get("item")
+                            .and_then(|v| v.clone().into_string().ok()),
+                        Some(item.to_owned())
+                    );
+                }
+                other => panic!("shipped actor with unknown id {other:?}"),
+            }
+        }
+
+        // The shipped scripts compile and answer the actor contract.
+        let mut scope = rhai::Scope::new();
+        if let Some(goblin) = scene
+            .actors
+            .iter()
+            .find(|a| a.id.as_deref() == Some("goblin"))
+        {
+            let goblin_script =
+                ActorScript::compile(include_str!("../../assets/scripts/goblin.rhai"))
+                    .expect("the shipped goblin script must compile");
+            // Far from the player the goblin closes in; close by it
+            // stays put. The player is a fixed distance north-east of
+            // wherever the goblin stands, so the step must close that gap.
+            let (goblin_x, goblin_z) = (goblin.position[0], goblin.position[1]);
+            let (player_x, player_z) = (goblin_x + 10.0, goblin_z - 10.0);
+            let moved = goblin_script
+                .update(&mut scope, goblin_x, goblin_z, player_x, player_z, 1.0 / 60.0)
+                .unwrap()
+                .position
+                .expect("the goblin approaches a far player");
+            assert!(moved[0] > goblin_x && moved[1] < goblin_z);
+            assert_eq!(
+                goblin_script
+                    .update(
+                        &mut scope,
+                        goblin_x,
+                        goblin_z,
+                        goblin_x,
+                        goblin_z,
+                        1.0 / 60.0,
+                    )
+                    .unwrap()
+                    .position,
+                None
+            );
+        }
+        if let Some(entrance) = scene
+            .actors
+            .iter()
+            .find(|a| a.id.as_deref() == Some("entrance-chest"))
+        {
+            let chest_script =
+                ActorScript::compile(include_str!("../../assets/scripts/chest.rhai"))
+                    .expect("the shipped chest script must compile");
+            // A chest with nobody nearby holds still and stays shut.
+            let (chest_x, chest_z) = (entrance.position[0], entrance.position[1]);
+            let tick = chest_script
+                .update(
+                    &mut scope,
+                    chest_x,
+                    chest_z,
+                    chest_x + 50.0,
+                    chest_z + 50.0,
+                    1.0 / 60.0,
+                )
+                .unwrap();
+            assert_eq!(tick.position, None);
+            assert!(tick.emote.is_none());
+        }
+    }
+
+    #[test]
     fn models_attach_when_their_gltf_loads() {
         let mut world = World::new();
         let mut gltfs = Assets::<Gltf>::default();
@@ -581,6 +717,7 @@ mod tests {
             script: None,
                 bubble: None,
                 said: None,
+                constrained: false,
             },
             ActorModel(handle),
             Transform::default(),
@@ -600,6 +737,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
+        // run_actor_scripts reads the scene's walk mesh; an empty asset
+        // collection means no scene is loaded, so nothing bounds actors.
+        world.insert_resource(Assets::<Scene>::default());
         world.spawn((Player, Transform::from_xyz(50.0, 0.9, 50.0)));
         let (actor, transform) = scripted_actor("fn on_update(x, z, px, pz, dt) { [x + 1.0, z] }");
         world.spawn((
@@ -625,6 +765,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
+        // run_actor_scripts reads the scene's walk mesh; an empty asset
+        // collection means no scene is loaded, so nothing bounds actors.
+        world.insert_resource(Assets::<Scene>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
         world.insert_resource(Assets::<bubble::GradientMaterial>::default());
@@ -667,6 +810,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
+        // run_actor_scripts reads the scene's walk mesh; an empty asset
+        // collection means no scene is loaded, so nothing bounds actors.
+        world.insert_resource(Assets::<Scene>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
         world.insert_resource(Assets::<bubble::GradientMaterial>::default());
@@ -698,6 +844,7 @@ mod tests {
                 script: Some(ScriptRuntime { script, scope }),
                 bubble: None,
                 said: None,
+                constrained: false,
             },
             Transform::from_xyz(0.0, 0.0, -6.0),
         ));
@@ -730,6 +877,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
+        // run_actor_scripts reads the scene's walk mesh; an empty asset
+        // collection means no scene is loaded, so nothing bounds actors.
+        world.insert_resource(Assets::<Scene>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
         world.insert_resource(Assets::<bubble::GradientMaterial>::default());
@@ -769,6 +919,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
+        // run_actor_scripts reads the scene's walk mesh; an empty asset
+        // collection means no scene is loaded, so nothing bounds actors.
+        world.insert_resource(Assets::<Scene>::default());
         world.spawn((Player, Transform::default()));
         let (actor, transform) = scripted_actor("fn on_update(x, z, px, pz, dt) { 7 }");
         let actor_entity = world.spawn((actor, transform)).id();
@@ -896,6 +1049,7 @@ mod tests {
                     at: None,
                     ..default()
                 }),
+                constrained: false,
             },
             Transform::from_translation(speaker_at),
             GlobalTransform::from(Transform::from_translation(speaker_at)),
@@ -908,6 +1062,7 @@ mod tests {
                     at: Some([160.0, 40.0]),
                     ..default()
                 }),
+                constrained: false,
             },
             Transform::default(),
             GlobalTransform::default(),

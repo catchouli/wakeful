@@ -62,6 +62,25 @@ Contributors work like any outside contributor — no special privileges:
 
 - **wakeful** is a game built with Bevy 0.19 (edition 2024). `cargo run` to
   play, `cargo test` for unit tests.
+- Two binaries share a library. The game is `src/main.rs`; the scene
+  editor is `cargo run --bin editor -- scenes/Village_Entrance.scene`
+  (a free camera, the plate as geometry, the walk mesh drawn; F5 or
+  just re-exporting the blend reloads it — bevy's own file watcher is
+  not enabled, so the editor polls the file's write time). What both
+  must agree on lives in `src/lib.rs`: the scene format, the walk mesh,
+  the assets root, `depth_card_mesh`, and `scene_merge`. The game
+  re-exports those with `pub use wakeful::{…}` so `crate::scene::…`
+  keeps resolving; the old in-game egui editor is gone, and with it the
+  `bevy_egui` dependency.
+- Scene files have two authors and the exporter is only one of them.
+  `tools/export_scenes.sh <blend>` is the whole export: Blender writes
+  the plate, the depth map and `assets/scenes/<name>.export` (gitignored),
+  then `cargo run --bin scene-merge` folds that half into `<name>.scene`,
+  keeping the `actors`, `teleporters` and `script` the editor and
+  hand-written scenes own (`ExportedScene` in `src/scene_merge.rs` is the
+  exporter's half; a stray `actors` in an export is dropped, not merged).
+  Consequence: `.scene` files are now generated, so **RON comments in
+  them do not survive an export** — say what a scene needs said elsewhere.
 - Bevy systems live in `src/systems/<concern>.rs` (e.g. `camera.rs`,
   `debug_draw.rs`); `main.rs` only wires plugins, schedules, and the shared
   components/resources the systems operate on. Self-contained feature modules
@@ -71,10 +90,27 @@ Contributors work like any outside contributor — no special privileges:
   — full retro pixelation for 2D and 3D alike.
 - Movement runs on a fixed 60hz `FixedUpdate` schedule; the movement math in
   `movement.rs` is ECS-free and unit tested.
+- Walkable ground is a triangle mesh, not a cell grid (`src/walkmesh.rs`,
+  ECS-free and unit tested like `movement.rs`). A scene carries it as
+  `walk_mesh: Option<WalkMesh>` — vertices plus triangle indices, exported
+  by `tools/generate_scene.py` from the mesh objects inside the scene's
+  `Cameras` sub-collection (read through the depsgraph so modifiers apply,
+  welded at a millimeter). Characters FOLLOW its height
+  (`walkmesh::ground_height`), so slopes carry them; `WalkableGrid` is gone
+  and a scene without a mesh bounds nothing. Actors are constrained by
+  default and opt out per actor with `constrained: false`.
+- Note for anyone running `cargo fmt`: this branch is NOT rustfmt-clean
+  (123 pre-existing diffs), and there is no CI. Format the file you are
+  working in; never `cargo fmt --all` on top of a feature change.
 - Art direction: FF7-style — 3D characters over pre-rendered backgrounds.
   The ground plane is a placeholder until real background art exists.
-- The debug shot layer (`src/debug_shot.rs`, `cfg(debug_assertions)`) renders
-  the game to screenshots and accepts input injection for agent-driven
-  visual verification.
+- The debug layer (`src/debug_shot.rs` + `src/debug_server.rs`, both
+  `cfg(debug_assertions)`): debug builds serve an MCP server on
+  `127.0.0.1:8399/mcp` (see `.opencode/skill/wakeful-debug`) whose
+  tools screenshot the game, inject input, dump state, and run rhai
+  against the live world — agent-driven verification without
+  recompiles. Commands flow through a queue drained at the head of
+  the fixed tick; screenshots land in `.debug/shots/`. Launching with
+  `--console` adds an interactive rhai REPL on stdin.
 - `src/bin/snapshot_mac_os.rs` was removed — the debug shot layer replaced
   it.
